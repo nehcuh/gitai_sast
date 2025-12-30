@@ -42,6 +42,7 @@ walkdir = "2.4"
 # Hashing
 md-5 = "0.10"
 sha2 = "0.10"
+async-trait = "0.1.89"
 
 [dev-dependencies]
 tokio-test = "0.4"
