@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { SastScanner } from '../core/SastScanner';
 import { DiagnosticManager } from '../core/DiagnosticManager';
+import { AiFixProvider } from '../ai/AiFixProvider';
 import { registerShowResultsCommand } from './showResults';
 
 /**
@@ -9,7 +10,8 @@ import { registerShowResultsCommand } from './showResults';
 export function registerScanCommands(
   context: vscode.ExtensionContext,
   scanner: SastScanner,
-  diagnostics: DiagnosticManager
+  diagnostics: DiagnosticManager,
+  aiFixProvider?: AiFixProvider
 ) {
   // 注册扫描当前文件命令
   const scanFileDisposable = vscode.commands.registerCommand(

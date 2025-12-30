@@ -7,6 +7,17 @@ import { Finding, SastDiagnostic } from './types';
 export class DiagnosticManager {
   private diagnostics = vscode.languages.createDiagnosticCollection('SAST');
   private currentFindings = new Map<string, Finding[]>();
+  private codeActionProvider: SastCodeActionProvider | null = null;
+
+  constructor(context: vscode.ExtensionContext) {
+    this.codeActionProvider = new SastCodeActionProvider(this);
+    context.subscriptions.push(
+      vscode.languages.registerCodeActionsProvider(
+        { scheme: 'file' },
+        this.codeActionProvider
+      )
+    );
+  }
 
   /**
    * 更新 Diagnostics
@@ -47,7 +58,7 @@ export class DiagnosticManager {
   private toVsCodeDiagnostic(uri: vscode.Uri, finding: Finding): vscode.Diagnostic {
     const range = new vscode.Range(
       new vscode.Position(finding.location.line - 1, finding.location.column || 0),
-      new vscode.Position(finding.location.line - 1, finding.location.column || 100)
+      new vscode.Position(finding.location.line - 1, (finding.location.column || 0) + 100)
     );
 
     const diagnostic = new vscode.Diagnostic(
@@ -59,9 +70,6 @@ export class DiagnosticManager {
     diagnostic.source = 'SAST';
     diagnostic.code = finding.rule_id;
     diagnostic.message = `${finding.description}\n\nSeverity: ${finding.severity}\nProvider: ${finding.provider}`;
-
-    // 添加 code actions
-    diagnostic.relatedInformation = [];
 
     return diagnostic;
   }
@@ -78,5 +86,48 @@ export class DiagnosticManager {
     };
 
     return severityMap[severity] || vscode.DiagnosticSeverity.Warning;
+  }
+
+  /**
+   * 获取 Code Action 提供者
+   */
+  getCodeActionProvider(): SastCodeActionProvider | null {
+    return this.codeActionProvider;
+  }
+}
+
+/**
+ * SAST Code Action 提供者
+ */
+class SastCodeActionProvider implements vscode.CodeActionProvider {
+  private onDidChangeCodeActionsEmitter = new vscode.EventEmitter<vscode.CodeAction[]>();
+
+  onDidChangeCodeActions = this.onDidChangeCodeActionsEmitter.event;
+
+  constructor(private diagnosticManager: DiagnosticManager) {}
+
+  provideCodeActions(
+    document: vscode.TextDocument,
+    range: vscode.Range | vscode.Selection,
+    context: vscode.CodeActionContext,
+    token: vscode.CancellationToken
+  ): vscode.ProviderResult<vscode.CodeAction[]> {
+    const actions: vscode.CodeAction[] = [];
+
+    // 只为 SAST Diagnostics 提供 AI 修复
+    const sastDiagnostics = context.diagnostics.filter(d => d.source === 'SAST');
+    
+    if (sastDiagnostics.length > 0) {
+      // TODO: 实现 AI 修复功能
+      const aiFixAction = new vscode.CodeAction(
+        'AI Fix (Coming soon)',
+        vscode.CodeActionKind.QuickFix
+      );
+      aiFixAction.diagnostics = sastDiagnostics;
+      aiFixAction.isPreferred = true;
+      actions.push(aiFixAction);
+    }
+
+    return actions;
   }
 }

@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { McpClient } from './core/McpClient';
 import { SastScanner } from './core/SastScanner';
 import { DiagnosticManager } from './core/DiagnosticManager';
+import { AiFixProvider } from './ai/AiFixProvider';
 import { registerScanCommands } from './commands/scan';
 
 /**
@@ -28,10 +29,20 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // 初始化核心组件
   const sastScanner = new SastScanner(mcpClient);
-  const diagnosticManager = new DiagnosticManager();
+  const diagnosticManager = new DiagnosticManager(context);
+  const aiFixProvider = new AiFixProvider();
+
+  // 检查 AI 可用性
+  const aiAvailable = await aiFixProvider.checkAvailability();
+  if (!aiAvailable) {
+    console.log('[GitAI SAST] AI model not available');
+    vscode.window.showWarningMessage('AI model not available. AI fix features will be disabled.');
+  } else {
+    console.log('[GitAI SAST] AI model available');
+  }
 
   // 注册命令
-  registerScanCommands(context, sastScanner, diagnosticManager);
+  registerScanCommands(context, sastScanner, diagnosticManager, aiFixProvider);
 
   // 注册自动扫描
   registerAutoScan(context, sastScanner, diagnosticManager);
