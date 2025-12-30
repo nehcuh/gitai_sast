@@ -1,4 +1,5 @@
-use crate::core::types::{ScanRequest, ScanResponse};
+use crate::core::types::ScanRequest;
+use crate::scanner::opengrep::{OpengrepScanner, ScanResult};
 use crate::tools::{Tool, ToolCallRequest, ToolCallResponse};
 use async_trait::async_trait;
 use serde_json::json;
@@ -67,11 +68,10 @@ impl Tool for ScanTool {
             .map_err(|e| format!("Failed to parse scan request: {}", e))?;
         
         // 执行扫描
-        // TODO: 实现实际的扫描逻辑
-        let scan_response = Self::execute_scan(scan_request).await?;
+        let scan_result = Self::execute_scan(scan_request).await?;
         
         // 返回结果
-        let result = serde_json::to_value(scan_response)
+        let result = serde_json::to_value(scan_result)
             .map_err(|e| format!("Failed to serialize scan response: {}", e))?;
         
         Ok(ToolCallResponse {
@@ -82,30 +82,22 @@ impl Tool for ScanTool {
 }
 
 impl ScanTool {
-    async fn execute_scan(request: ScanRequest) -> Result<ScanResponse, String> {
-        let start = std::time::Instant::now();
-        
+    async fn execute_scan(request: ScanRequest) -> Result<ScanResult, String> {
         info!("Starting scan for {} files", request.files.len());
         
-        // 模拟扫描 - 实际实现需要调用 Opengrep CLI
-        let findings = vec![];
+        // 创建 Opengrep 扫描器
+        let scanner = OpengrepScanner::new(None);
         
-        // 构建响应
-        let response = ScanResponse {
-            version: request.version,
-            status: crate::core::types::ScanStatus::Success,
-            scan_envelope: crate::core::types::ScanEnvelope {
-                scan_id: uuid::Uuid::new_v4().to_string(),
-                timestamp: chrono::Utc::now(),
-                files_scanned: request.files.len(),
-                total_lines: request.files.values().map(|c| c.lines().count()).sum(),
-                duration_ms: start.elapsed().as_millis() as u64,
-            },
-            findings,
-        };
+        // 执行扫描
+        let scan_result = scanner.scan(
+            &request.root,
+            request.files,
+            request.ignores,
+            &request.config,
+        ).await.map_err(|e| format!("Scan failed: {}", e))?;
         
-        info!("Scan completed in {}ms", response.scan_envelope.duration_ms);
+        info!("Scan completed: {} findings", scan_result.findings.len());
         
-        Ok(response)
+        Ok(scan_result)
     }
 }

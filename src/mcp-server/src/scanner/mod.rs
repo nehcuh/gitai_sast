@@ -1,4 +1,3 @@
-// Scanner 模块占位符
-// 实际扫描逻辑将在后续实现
+pub mod opengrep;
 
-pub struct Scanner;
+pub use opengrep::{OpengrepScanner};
