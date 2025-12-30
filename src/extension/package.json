@@ -1,0 +1,95 @@
+{
+  "name": "gitai-sast",
+  "displayName": "GitAI SAST",
+  "description": "AI-powered static code analysis for VSCode",
+  "version": "0.1.0",
+  "publisher": "gitai",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Linters"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onLanguage:typescript",
+    "onLanguage:javascript",
+    "onLanguage:python",
+    "onLanguage:java",
+    "onLanguage:rust"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "gitai.sast.scan",
+        "title": "Scan Current File",
+        "category": "GitAI SAST"
+      },
+      {
+        "command": "gitai.sast.scanWorkspace",
+        "title": "Scan Workspace",
+        "category": "GitAI SAST"
+      },
+      {
+        "command": "gitai.sast.showResults",
+        "title": "Show Scan Results",
+        "category": "GitAI SAST"
+      }
+    ],
+    "configuration": {
+      "title": "GitAI SAST",
+      "properties": {
+        "gitai.sast.mcpServerPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to MCP Server binary"
+        },
+        "gitai.sast.severityThreshold": {
+          "type": "string",
+          "enum": ["low", "medium", "high", "critical"],
+          "default": "medium",
+          "description": "Minimum severity level to report"
+        },
+        "gitai.sast.enableAutoScan": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable automatic scanning on file save"
+        },
+        "gitai.sast.enableRemoteScan": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable remote SAST scan"
+        },
+        "gitai.sast.remoteUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Remote SAST API URL"
+        },
+        "gitai.sast.remoteToken": {
+          "type": "string",
+          "default": "",
+          "description": "Remote SAST API token"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --ext ts",
+    "test": "node ./out/test/runTest.js"
+  },
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "@types/vscode": "^1.80.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.45.0",
+    "typescript": "^5.1.6"
+  },
+  "dependencies": {
+    "uuid": "^9.0.0"
+  }
+}
