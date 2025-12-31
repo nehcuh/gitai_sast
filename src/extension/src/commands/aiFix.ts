@@ -1,10 +1,12 @@
 import * as vscode from 'vscode';
-import { AiFixProvider } from '../ai/AiFixProvider';
+import { AiFixProvider, GenerateFixOptions } from '../ai/AiFixProvider';
+import { McpClient } from '../core/McpClient';
 import { Finding } from '../core/types';
 
 export function registerAiFixCommand(
   context: vscode.ExtensionContext,
-  aiFixProvider: AiFixProvider
+  aiFixProvider: AiFixProvider,
+  mcpClient: McpClient
 ) {
   const disposable = vscode.commands.registerCommand(
     'gitai.sast.aiFix',
@@ -18,10 +20,43 @@ export function registerAiFixCommand(
       const editor = await vscode.window.showTextDocument(document, { preview: true });
 
       const codeSnippet = getCodeSnippet(document, finding);
-      const extraContext = {
+      const extraContext: any = {
         file: uri.fsPath,
         languageId: document.languageId,
       };
+
+      if (finding.provider === 'remote' && typeof finding.issue_content === 'string' && finding.issue_content.trim()) {
+        try {
+          const root = getWorkspaceRoot(uri);
+          if (root) {
+            await mcpClient.ensureConnected();
+            const taintResponse = await mcpClient.callTool('get_taint_path', {
+              version: 1,
+              root,
+              finding,
+            });
+            if (taintResponse?.taint_path?.steps?.length) {
+              extraContext.taint_path = taintResponse.taint_path;
+            }
+          }
+        } catch (error) {
+          console.warn('[GitAI SAST] Failed to fetch taint path context:', error);
+        }
+      }
+
+      const aiConfig = vscode.workspace.getConfiguration('gitai.sast.ai');
+      const streamEnabled = aiConfig.get<boolean>('stream', true);
+      const enableThinking = aiConfig.get<boolean>('enableThinking', false);
+
+      const streamPreview = streamEnabled
+        ? await createStreamingPreview(uri, finding, enableThinking)
+        : null;
+
+      const fixOptions: GenerateFixOptions | undefined = streamPreview
+        ? {
+            onDelta: (delta) => streamPreview.append(delta.kind, delta.text),
+          }
+        : undefined;
 
       try {
         const result = await vscode.window.withProgress(
@@ -30,8 +65,12 @@ export function registerAiFixCommand(
             title: 'Generating AI fix...',
             cancellable: false,
           },
-          async () => aiFixProvider.generateFix(finding, codeSnippet, extraContext)
+          async () => aiFixProvider.generateFix(finding, codeSnippet, extraContext, fixOptions)
         );
+
+        if (streamPreview) {
+          await streamPreview.finalize(result.suggestion, result.thinking);
+        }
 
         const selection = await vscode.window.showInformationMessage(
           'AI fix generated',
@@ -47,7 +86,7 @@ export function registerAiFixCommand(
         }
 
         if (selection === 'Open Suggestion') {
-          await openSuggestion(uri, finding, result.suggestion, result.code);
+          await openSuggestion(uri, finding, result.suggestion, result.code, result.thinking);
           return;
         }
 
@@ -56,17 +95,178 @@ export function registerAiFixCommand(
           if (applied) {
             vscode.window.showInformationMessage('AI fix applied');
           } else {
-            await openSuggestion(uri, finding, result.suggestion, result.code);
+            await openSuggestion(uri, finding, result.suggestion, result.code, result.thinking);
           }
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        if (streamPreview) {
+          await streamPreview.setError(message);
+        }
         vscode.window.showErrorMessage(`AI Fix failed: ${message}`);
       }
     }
   );
 
   context.subscriptions.push(disposable);
+}
+
+async function createStreamingPreview(uri: vscode.Uri, finding: Finding, enableThinking: boolean) {
+  const state = {
+    thinking: '',
+    content: '',
+    status: 'Streaming...',
+    lastRendered: '',
+    lastRenderedThinking: '',
+    lastRenderedStatus: '',
+    renderTimer: undefined as NodeJS.Timeout | undefined,
+    renderPromise: Promise.resolve(),
+  };
+
+  const doc = await vscode.workspace.openTextDocument({
+    language: 'markdown',
+    content: buildStreamingMarkdown(uri, finding, enableThinking, '', '', state.status),
+  });
+
+  const textEditor = await vscode.window.showTextDocument(doc, {
+    preview: true,
+    viewColumn: vscode.ViewColumn.Beside,
+  });
+
+  try {
+    await vscode.commands.executeCommand('markdown.showPreviewToSide', doc.uri);
+  } catch {
+    // Ignore if the markdown extension/preview is unavailable.
+  }
+
+  const scheduleRender = (status: string) => {
+    state.status = status;
+    if (state.renderTimer) {
+      return;
+    }
+    state.renderTimer = setTimeout(() => {
+      state.renderTimer = undefined;
+      void render();
+    }, 80);
+  };
+
+  const render = async () => {
+    if (
+      enableThinking &&
+      state.thinking === state.lastRenderedThinking &&
+      state.content === state.lastRendered &&
+      state.status === state.lastRenderedStatus
+    ) {
+      return;
+    }
+    if (!enableThinking && state.content === state.lastRendered && state.status === state.lastRenderedStatus) {
+      return;
+    }
+
+    state.lastRendered = state.content;
+    state.lastRenderedThinking = state.thinking;
+    state.lastRenderedStatus = state.status;
+
+    const nextMarkdown = buildStreamingMarkdown(
+      uri,
+      finding,
+      enableThinking,
+      state.thinking,
+      state.content,
+      state.status
+    );
+
+    state.renderPromise = state.renderPromise.then(async () => {
+      await replaceEditorDocument(textEditor, nextMarkdown);
+    });
+
+    await state.renderPromise;
+  };
+
+  return {
+    append: (kind: 'thinking' | 'content', text: string) => {
+      if (!text) {
+        return;
+      }
+      if (kind === 'thinking') {
+        if (!enableThinking) {
+          return;
+        }
+        state.thinking += text;
+        scheduleRender('Streaming (thinking)...');
+        return;
+      }
+      state.content += text;
+      scheduleRender('Streaming...');
+    },
+    finalize: async (fullSuggestion: string, thinking?: string) => {
+      if (enableThinking && typeof thinking === 'string' && thinking.trim()) {
+        state.thinking = thinking;
+      }
+      state.content = fullSuggestion;
+      state.status = 'Done';
+      await render();
+    },
+    setError: async (message: string) => {
+      state.status = `Error: ${message}`;
+      await render();
+    },
+  };
+}
+
+async function replaceEditorDocument(editor: vscode.TextEditor, text: string): Promise<void> {
+  const document = editor.document;
+  const current = document.getText();
+  if (current === text) {
+    return;
+  }
+
+  const fullRange = new vscode.Range(document.positionAt(0), document.positionAt(current.length));
+
+  await editor.edit(
+    (editBuilder) => {
+      editBuilder.replace(fullRange, text);
+    },
+    { undoStopBefore: false, undoStopAfter: false }
+  );
+}
+
+function buildStreamingMarkdown(
+  uri: vscode.Uri,
+  finding: Finding,
+  enableThinking: boolean,
+  thinking: string,
+  content: string,
+  status: string
+): string {
+  const safeThinking = (thinking || '').trim();
+  const safeContent = (content || '').trim();
+
+  const thinkingSection =
+    enableThinking && safeThinking
+      ? `\n\n## Thinking\n\n\`\`\`\n${safeThinking}\n\`\`\`\n`
+      : '';
+
+  return (
+    `# AI Fix (Streaming)\n\n` +
+    `- Status: ${status}\n` +
+    `- File: \`${uri.fsPath}\`\n` +
+    `- Rule ID: \`${finding.rule_id}\`\n` +
+    `- Severity: \`${finding.severity}\`\n` +
+    `- Title: ${finding.title}\n` +
+    `- Provider: \`${finding.provider}\`\n` +
+    thinkingSection +
+    `\n\n## Output\n\n${safeContent}\n`
+  );
+}
+
+function getWorkspaceRoot(uri: vscode.Uri): string {
+  const folder = vscode.workspace.getWorkspaceFolder(uri);
+  if (folder) {
+    return folder.uri.fsPath;
+  }
+
+  return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || vscode.workspace.rootPath || '';
 }
 
 function getCodeSnippet(document: vscode.TextDocument, finding: Finding): string {
@@ -95,9 +295,10 @@ async function openSuggestion(
   uri: vscode.Uri,
   finding: Finding,
   suggestion: string,
-  code: string
+  code: string,
+  thinking?: string
 ) {
-  const markdown = buildSuggestionMarkdown(uri, finding, suggestion, code);
+  const markdown = buildSuggestionMarkdown(uri, finding, suggestion, code, thinking);
   const doc = await vscode.workspace.openTextDocument({
     language: 'markdown',
     content: markdown,
@@ -109,9 +310,12 @@ function buildSuggestionMarkdown(
   uri: vscode.Uri,
   finding: Finding,
   suggestion: string,
-  code: string
+  code: string,
+  thinking?: string
 ): string {
   const languageHint = guessCodeFenceLanguage(uri.fsPath);
+  const safeThinking = (thinking || '').trim();
+  const thinkingBlock = safeThinking ? `\n\n## Thinking\n\n\`\`\`\n${safeThinking}\n\`\`\`\n` : '';
   const codeBlock = code.trim()
     ? `\n\n## Fix Code\n\n\`\`\`${languageHint}\n${code}\n\`\`\`\n`
     : '';
@@ -122,7 +326,8 @@ function buildSuggestionMarkdown(
     `- Rule ID: \`${finding.rule_id}\`\n` +
     `- Severity: \`${finding.severity}\`\n` +
     `- Title: ${finding.title}\n\n` +
-    `## Suggestion\n\n${suggestion.trim()}\n` +
+    thinkingBlock +
+    `\n\n## Suggestion\n\n${suggestion.trim()}\n` +
     codeBlock
   );
 }
