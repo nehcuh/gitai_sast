@@ -24,6 +24,7 @@ export interface IgnoreList {
  */
 export class IgnoreManager {
   private static readonly IGNORES_FILE = '.vscode/sast.ignores.json';
+  private static ignoreCache: Map<string, IgnoreRule[]> = new Map();
 
   /**
    * 忽略特定出现位置
@@ -41,6 +42,9 @@ export class IgnoreManager {
 
     ignores.push(newIgnore);
     await this.saveIgnores(uri, ignores);
+
+    // 清除缓存
+    this.ignoreCache.delete(this.getCacheKey(uri));
   }
 
   /**
@@ -57,6 +61,9 @@ export class IgnoreManager {
 
     ignores.push(newIgnore);
     await this.saveIgnores(uri, ignores);
+
+    // 清除缓存
+    this.ignoreCache.delete(this.getCacheKey(uri));
   }
 
   /**
@@ -78,14 +85,48 @@ export class IgnoreManager {
 
     ignores.push(newIgnore);
     await this.saveIgnores(uri, ignores);
+
+    // 清除所有缓存（因为这是全局规则）
+    this.ignoreCache.clear();
   }
 
   /**
    * 检查是否应该忽略某个 Finding
    */
   static shouldIgnore(uri: vscode.Uri, finding: Finding): boolean {
-    // TODO: 实现忽略检查逻辑
-    // 需要加载忽略列表，并检查是否匹配
+    const ignores = this.ignoreCache.get(this.getCacheKey(uri));
+
+    if (!ignores || ignores.length === 0) {
+      return false;
+    }
+
+    // 遍历所有忽略规则
+    for (const ignore of ignores) {
+      // 全局规则：只匹配 rule_id
+      if (!ignore.file && ignore.rule_id === finding.rule_id) {
+        return true;
+      }
+
+      // 文件规则：匹配 file 和 rule_id
+      if (
+        ignore.file === uri.fsPath &&
+        !ignore.line &&
+        ignore.rule_id === finding.rule_id
+      ) {
+        return true;
+      }
+
+      // 特定出现规则：匹配 file、line、column 和 rule_id
+      if (
+        ignore.file === uri.fsPath &&
+        ignore.line === finding.location.line &&
+        ignore.column === finding.location.column &&
+        ignore.rule_id === finding.rule_id
+      ) {
+        return true;
+      }
+    }
+
     return false;
   }
 
@@ -113,6 +154,30 @@ export class IgnoreManager {
       // 文件不存在或解析失败，返回空列表
       return [];
     }
+  }
+
+  /**
+   * 预加载忽略列表到缓存
+   */
+  static async preloadIgnores(uri: vscode.Uri): Promise<void> {
+    const cacheKey = this.getCacheKey(uri);
+    if (this.ignoreCache.has(cacheKey)) {
+      return;
+    }
+
+    const ignores = await this.loadIgnores(uri);
+    this.ignoreCache.set(cacheKey, ignores);
+  }
+
+  /**
+   * 获取缓存键
+   */
+  private static getCacheKey(uri: vscode.Uri): string {
+    const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri);
+    if (!workspaceFolder) {
+      return uri.fsPath;
+    }
+    return workspaceFolder.uri.fsPath;
   }
 
   /**
