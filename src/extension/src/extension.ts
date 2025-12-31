@@ -121,7 +121,7 @@ function registerAutoScan(
   // 监听文件保存事件
   const saveDisposable = vscode.workspace.onDidSaveTextDocument(async (document) => {
     const uri = document.uri.toString();
-    
+
     // 只扫描支持的文件类型
     if (!isSupportedFile(document)) {
       return;
@@ -158,6 +158,6 @@ function registerAutoScan(
 function isSupportedFile(document: vscode.TextDocument): boolean {
   const supportedExtensions = ['.ts', '.tsx', '.js', '.jsx', '.py', '.java', '.rs'];
   const fileName = document.fileName.toLowerCase();
-  
+
   return supportedExtensions.some(ext => fileName.endsWith(ext));
 }
