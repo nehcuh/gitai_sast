@@ -65,7 +65,7 @@ export class IntentRecognizer {
     document: vscode.TextDocument
   ): any | null {
     // 尝试从输入中提取 Rule ID
-    const ruleIdMatch = input.match(/rule\s*id\s*[:\s]*([a-z0-9\.-]+)/i);
+    const ruleIdMatch = input.match(/rule\s*id\s*[:\s]*([a-z0-9.-]+)/i);
     if (ruleIdMatch) {
       const ruleId = ruleIdMatch[1];
       // TODO: 从 DiagnosticManager 获取 findings
