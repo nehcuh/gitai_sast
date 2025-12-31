@@ -23,6 +23,8 @@ coverage/
 .env
 .env.local
 .env.*.local
+*.pem
+*.vsix
 
 # IDE
 .idea/
