@@ -1,6 +1,10 @@
 import * as vscode from 'vscode';
 import { Finding } from '../core/types';
-import { createChatCompletion } from './OpenAiCompatibleClient';
+import {
+  createChatCompletion,
+  OpenAiCompatibleChatMessage,
+} from './OpenAiCompatibleClient';
+import { CopilotAgentProvider } from './CopilotAgentProvider';
 import * as output from '../core/OutputLogger';
 
 /**
@@ -8,6 +12,7 @@ import * as output from '../core/OutputLogger';
  */
 export class AiFixProvider {
   private languageModel: vscode.LanguageModelChat | null = null;
+  private activeProvider: AiProvider | null = null;
 
   constructor() {}
 
@@ -31,185 +36,98 @@ export class AiFixProvider {
     }
 
     if (settings.provider === 'disabled') {
-      throw new Error('AI provider is disabled. Set "gitai.sast.ai.provider" to enable AI fixes.');
+      throw new Error(
+        'AI provider is disabled. Set "gitai.sast.ai.provider" to enable AI fixes.'
+      );
+    }
+
+    // 确保可用性并设置 activeProvider
+    if (!this.activeProvider) {
+      const available = await this.checkAvailability();
+      if (!available) {
+        throw new Error('No AI provider is available.');
+      }
     }
 
     const prompts = this.buildPrompts(finding, codeSnippet, context);
 
-    if (settings.provider === 'vscode') {
+    if (this.activeProvider === 'vscode') {
       const model = await this.ensureVsCodeLanguageModel();
       const prompt = `${prompts.system}\n\n${prompts.user}`.trim();
 
       if (debugEnabled) {
-        output.debug(`[AI] provider=vscode prompt=${truncateForLog(prompt, settings.debugMaxChars)}`);
+        output.debug(
+          `[AI] provider=vscode prompt=${truncateForLog(
+            prompt,
+            settings.debugMaxChars
+          )}`
+        );
       }
 
       const messages: vscode.LanguageModelChatMessage[] = [
         vscode.LanguageModelChatMessage.User(prompt),
       ];
 
-      const response = await model.sendRequest(
-        messages,
-        {},
-        new vscode.CancellationTokenSource().token
-      );
+      const response = await model.sendRequest(messages, {}, options?.token);
+      let responseText = '';
 
-      const textParts: string[] = [];
-      for await (const part of response.text) {
-        options?.onDelta?.({ kind: 'content', text: part });
-        textParts.push(part);
-      }
-      const text = textParts.join('');
-
-      if (debugEnabled) {
-        output.debug(`[AI] provider=vscode response=${truncateForLog(text, settings.debugMaxChars)}`);
+      for await (const chunk of response.text) {
+        responseText += chunk;
+        if (options?.onDelta) {
+          options.onDelta({
+            kind: 'content',
+            text: chunk,
+          });
+        }
       }
 
-      return {
-        suggestion: text,
-        code: this.extractCode(text),
-        provider: 'vscode-lm',
-      };
-    }
-
-    if (debugEnabled) {
-      output.debug(`[AI] provider=openaiCompatible apiUrl=${settings.apiUrl} model=${settings.modelName}`);
-      output.debug(`[AI] system=${truncateForLog(prompts.system, settings.debugMaxChars)}`);
-      output.debug(`[AI] user=${truncateForLog(prompts.user, settings.debugMaxChars)}`);
-    }
-
-    const thinkingParts: string[] = [];
-
-    const text = await createChatCompletion(
-      {
-        apiUrl: settings.apiUrl,
-        apiKey: settings.apiKey,
-        model: settings.modelName,
-        temperature: settings.temperature,
-        timeoutMs: settings.requestTimeoutMs,
-        stream: settings.stream,
-        onDelta: options?.onDelta
-          ? (text) => options.onDelta?.({ kind: 'content', text })
-          : undefined,
-        onThinkingDelta: settings.enableThinking
-          ? (text) => {
-              thinkingParts.push(text);
-              options?.onDelta?.({ kind: 'thinking', text });
-            }
-          : undefined,
-        debugLog: debugEnabled ? (line) => output.debug(line) : undefined,
-        debugMaxChars: settings.debugMaxChars,
-      },
-      [
+      return this.parseResponse(responseText, 'vscode');
+    } else if (this.activeProvider === 'openaiCompatible') {
+      const messages: OpenAiCompatibleChatMessage[] = [
         { role: 'system', content: prompts.system },
         { role: 'user', content: prompts.user },
-      ]
-    );
+      ];
 
-    if (debugEnabled) {
-      output.debug(`[AI] provider=openaiCompatible content=${truncateForLog(text, settings.debugMaxChars)}`);
+      const response = await createChatCompletion(
+        {
+          apiUrl: settings.apiUrl,
+          apiKey: settings.apiKey,
+          model: settings.modelName,
+          temperature: settings.temperature,
+          timeoutMs: settings.requestTimeoutMs,
+          stream: options?.stream ?? settings.stream,
+          onDelta: options?.onDelta
+            ? (text: string) => {
+                options.onDelta!({ kind: 'content', text });
+              }
+            : undefined,
+          onThinkingDelta: settings.enableThinking
+            ? (text: string) => {
+                options?.onDelta?.({ kind: 'thinking', text });
+              }
+            : undefined,
+          debugLog: debugEnabled
+            ? (line: string) => {
+                output.debug(`[AI] ${line}`);
+              }
+            : undefined,
+          debugMaxChars: settings.debugMaxChars,
+        },
+        messages
+      );
+
+      return this.parseResponse(response, 'openaiCompatible');
+    } else if (this.activeProvider === 'copilotAgent') {
+      const prompt = `${prompts.system}\n\n${prompts.user}`.trim();
+      const response = await CopilotAgentProvider.request(prompt, {
+        stream: options?.stream ?? settings.stream,
+        onDelta: options?.onDelta,
+      });
+
+      return this.parseResponse(response, 'copilotAgent');
     }
 
-    return {
-      suggestion: text,
-      code: this.extractCode(text),
-      provider: 'openai-compatible',
-      thinking: thinkingParts.join('').trim() || undefined,
-    };
-  }
-
-  /**
-   * 构建提示（system + user）
-   */
-  private buildPrompts(
-    finding: Finding,
-    codeSnippet: string,
-    context?: any
-  ): { system: string; user: string } {
-    const settings = this.getAiSettings();
-
-    const defaultSystem = settings.enableThinking
-      ? [
-          '你是一名资深应用安全（AppSec）工程师。请基于提供的代码片段给出安全、最小化且可落地的修复方案。',
-          '',
-          '输出要求：',
-          '- 解释部分使用中文输出，但所有专业术语使用英文（例如 vulnerability type、attack vector、threat model、root cause、taint flow、source/sink/sanitizer、input validation、encoding/escaping、SQL injection、XSS、CSRF、SSRF、RCE、CWE/OWASP、以及库名/API/函数/类名等）。',
-          '- 修复代码放在最后，并且只输出一个 ``` 代码块（不要输出 diff）。',
-          '- 代码块内保持目标语言的常见格式与正确缩进；尽量最小改动，不引入新问题。',
-          '- 如果上下文不足，请说明你的假设，并给出最小可行修复（minimal viable fix）。',
-        ].join('\n')
-      : [
-          '你是一名资深应用安全（AppSec）工程师。请基于提供的代码片段给出安全、最小化且可落地的修复方案。',
-          '',
-          '输出要求：',
-          '- 不要输出思考过程、推理过程或长解释；最多 3 条要点（可选）。',
-          '- 修复代码放在最后，并且只输出一个 ``` 代码块（不要输出 diff）。',
-          '- 代码块内保持目标语言的常见格式与正确缩进；尽量最小改动，不引入新问题。',
-        ].join('\n');
-
-    const variables: Record<string, string> = {
-      rule_id: finding.rule_id,
-      severity: finding.severity,
-      title: finding.title,
-      description: finding.description,
-      code_snippet: codeSnippet,
-      context: context ? JSON.stringify(context, null, 2) : '',
-    };
-
-    const system = (settings.systemPrompt?.trim() || defaultSystem).trim();
-
-    if (settings.userPromptTemplate?.trim()) {
-      return {
-        system,
-        user: renderTemplate(settings.userPromptTemplate, variables).trim(),
-      };
-    }
-
-    let user = `请修复下面的安全问题，并按要求输出。\n\n`;
-    user += `## Vulnerability\n`;
-    user += `- Rule ID: ${finding.rule_id}\n`;
-    user += `- Severity: ${finding.severity}\n`;
-    user += `- Title: ${finding.title}\n`;
-    user += `- Description: ${finding.description}\n`;
-    user += `\n## Code Snippet\n`;
-    user += `\`\`\`\n${codeSnippet}\n\`\`\`\n`;
-
-    if (context) {
-      user += `\n## Context\n`;
-      user += `${JSON.stringify(context, null, 2)}\n`;
-    }
-
-    user += `\n## Instructions\n`;
-    if (settings.enableThinking) {
-      user += `1. 用中文解释：root cause、可能的 attack scenario、修复思路与 trade-offs（专业术语用英文，不要翻译）。\n`;
-      user += `2. 给出修复后的代码（仅一个代码块），保证缩进/格式正确，可直接替换或粘贴。\n`;
-      user += `3. 尽量保持最小改动；不要引入与该问题无关的重构。\n`;
-    } else {
-      user += `1. 直接给出修复后的代码（仅一个代码块），保证缩进/格式正确，可直接替换或粘贴。\n`;
-      user += `2. 如需说明，最多 3 条要点；不要输出长解释/推理过程。\n`;
-      user += `3. 尽量保持最小改动；不要引入与该问题无关的重构。\n`;
-    }
-
-    return { system, user: user.trim() };
-  }
-
-  /**
-   * 提取代码块
-   */
-  private extractCode(text: string): string {
-    // 提取 ``` 到 ``` 之间的代码
-    const codeBlockRegex = /```(?:[\w-]+)?\s*\n([\s\S]*?)\n?```/;
-    const match = text.match(codeBlockRegex);
-
-    if (!match) {
-      return text;
-    }
-
-    // 注意：不能用 trim()，否则会误删代码第一行的缩进（例如函数体内片段）。
-    let extracted = match[1];
-    extracted = extracted.replace(/^\n+/, '');
-    extracted = extracted.replace(/\s+$/, '');
-    return extracted;
+    throw new Error(`Unsupported provider: ${this.activeProvider}`);
   }
 
   /**
@@ -220,22 +138,99 @@ export class AiFixProvider {
 
     if (settings.provider === 'disabled') {
       this.languageModel = null;
+      this.activeProvider = null;
       return false;
     }
 
-    if (settings.provider === 'openaiCompatible') {
-      this.languageModel = null;
-      return Boolean(settings.apiUrl.trim() && settings.modelName.trim());
+    if (settings.provider === 'auto') {
+      // 按优先级检测可用的提供商
+      for (const provider of settings.autoDetectPriority) {
+        const available = await this.checkProviderAvailable(provider);
+        if (available) {
+          this.activeProvider = provider;
+          return true;
+        }
+      }
+      this.activeProvider = null;
+      return false;
     }
 
+    // 指定的提供商
+    const available = await this.checkProviderAvailable(
+      settings.provider
+    );
+    if (available) {
+      this.activeProvider = settings.provider;
+      return true;
+    }
+    this.activeProvider = null;
+    return false;
+  }
+
+  /**
+   * 检查特定提供商是否可用
+   */
+  private async checkProviderAvailable(provider: AiProvider): Promise<boolean> {
+    switch (provider) {
+      case 'copilotAgent':
+        return await CopilotAgentProvider.checkAvailability();
+      case 'vscode':
+        return await this.checkVsCodeLmAvailable();
+      case 'openaiCompatible':
+        return await this.checkOpenAiCompatibleAvailable();
+      default:
+        return false;
+    }
+  }
+
+  /**
+   * 检查 VS Code Language Model 是否可用
+   */
+  private async checkVsCodeLmAvailable(): Promise<boolean> {
     try {
       const models = await vscode.lm.selectChatModels();
-      this.languageModel = models[0] || null;
-      return this.languageModel !== null;
+      return models.length > 0;
     } catch {
-      this.languageModel = null;
       return false;
     }
+  }
+
+  /**
+   * 检查 OpenAI Compatible API 是否可用
+   */
+  private async checkOpenAiCompatibleAvailable(): Promise<boolean> {
+    const config = vscode.workspace.getConfiguration('gitai.sast.ai');
+    return Boolean(
+      config.get<string>('apiUrl')?.trim() &&
+        config.get<string>('modelName')?.trim()
+    );
+  }
+
+  private buildPrompts(
+    finding: Finding,
+    codeSnippet: string,
+    context?: any
+  ): { system: string; user: string } {
+    const settings = this.getAiSettings();
+
+    const systemPrompt =
+      settings.systemPrompt ||
+      'You are a security analyst and code reviewer. Your task is to analyze security vulnerabilities and provide remediation suggestions.';
+
+    const userPromptTemplate =
+      settings.userPromptTemplate ||
+      '## Vulnerability\n\n**Rule ID:** {rule_id}\n**Severity:** {severity}\n**Title:** {title}\n**Description:** {description}\n\n## Code\n\n```{language}\n{code}\n```\n\nPlease provide a detailed explanation and a fix suggestion.';
+
+    const userPrompt = renderTemplate(userPromptTemplate, {
+      rule_id: finding.rule_id,
+      severity: finding.severity,
+      title: finding.title,
+      description: finding.description || '',
+      code: codeSnippet,
+      language: 'plaintext',
+    });
+
+    return { system: systemPrompt, user: userPrompt };
   }
 
   private async ensureVsCodeLanguageModel(): Promise<vscode.LanguageModelChat> {
@@ -255,14 +250,55 @@ export class AiFixProvider {
     return this.languageModel;
   }
 
+  private parseResponse(response: string, provider: string): AiFixResult {
+    // 尝试解析为 JSON
+    try {
+      const parsed = JSON.parse(response);
+
+      if (parsed.suggestion && parsed.code) {
+        return {
+          suggestion: parsed.suggestion,
+          code: parsed.code,
+          provider,
+          thinking: parsed.thinking,
+        };
+      }
+    } catch {
+      // 不是 JSON，继续处理
+    }
+
+    // 尝试提取代码块
+    const codeMatch = response.match(
+      /```(?:[\w-]+)?\s*\n([\s\S]*?)\n?```/
+    );
+    const code = codeMatch ? codeMatch[1].trim() : '';
+
+    return {
+      suggestion: response,
+      code,
+      provider,
+    };
+  }
+
   private getAiSettings(): AiSettings {
     const config = vscode.workspace.getConfiguration('gitai.sast.ai');
 
-    const providerRaw = config.get<string>('provider', 'vscode');
-    const provider: AiProvider = isAiProvider(providerRaw) ? providerRaw : 'vscode';
+    const providerRaw = config.get<string>('provider', 'auto');
+    const provider: AiProvider = isAiProvider(providerRaw)
+      ? providerRaw
+      : 'auto';
+
+    const autoDetectPriorityRaw = config.get<string[]>(
+      'autoDetectPriority',
+      ['copilotAgent', 'vscode', 'openaiCompatible']
+    );
+    const autoDetectPriority: AiProvider[] = autoDetectPriorityRaw.filter(
+      (p): p is AiProvider => isAiProvider(p)
+    );
 
     return {
       provider,
+      autoDetectPriority,
       apiUrl: config.get<string>('apiUrl', '') || '',
       apiKey: config.get<string>('apiKey', '') || '',
       modelName: config.get<string>('modelName', '') || '',
@@ -271,17 +307,27 @@ export class AiFixProvider {
       stream: config.get<boolean>('stream', true),
       enableThinking: config.get<boolean>('enableThinking', false),
       systemPrompt: config.get<string>('systemPrompt', '') || '',
-      userPromptTemplate: config.get<string>('userPromptTemplate', '') || '',
+      userPromptTemplate:
+        config.get<string>('userPromptTemplate', '') || '',
       debugLogging: config.get<boolean>('debugLogging', false),
-      debugMaxChars: Math.max(1000, config.get<number>('debugMaxChars', 12000)),
+      debugMaxChars: Math.max(
+        1000,
+        config.get<number>('debugMaxChars', 12000)
+      ),
     };
   }
 }
 
-type AiProvider = 'disabled' | 'vscode' | 'openaiCompatible';
+type AiProvider =
+  | 'disabled'
+  | 'vscode'
+  | 'openaiCompatible'
+  | 'copilotAgent'
+  | 'auto';
 
 interface AiSettings {
   provider: AiProvider;
+  autoDetectPriority: AiProvider[];
   apiUrl: string;
   apiKey: string;
   modelName: string;
@@ -296,16 +342,30 @@ interface AiSettings {
 }
 
 function isAiProvider(value: string): value is AiProvider {
-  return value === 'disabled' || value === 'vscode' || value === 'openaiCompatible';
+  return (
+    value === 'disabled' ||
+    value === 'vscode' ||
+    value === 'openaiCompatible' ||
+    value === 'copilotAgent' ||
+    value === 'auto'
+  );
 }
 
-function renderTemplate(template: string, variables: Record<string, string>): string {
-  return template.replace(/\{([a-zA-Z0-9_]+)\}/g, (match, key) => {
-    if (typeof key !== 'string') {
-      return match;
+function renderTemplate(
+  template: string,
+  variables: Record<string, string>
+): string {
+  return template.replace(
+    /\{([a-zA-Z0-9_]+)\}/g,
+    (match, key) => {
+      if (typeof key !== 'string') {
+        return match;
+      }
+      return Object.prototype.hasOwnProperty.call(variables, key)
+        ? variables[key]
+        : match;
     }
-    return Object.prototype.hasOwnProperty.call(variables, key) ? variables[key] : match;
-  });
+  );
 }
 
 /**
@@ -323,9 +383,17 @@ function truncateForLog(text: string, maxChars: number): string {
   if (normalized.length <= maxChars) {
     return normalized;
   }
-  return `${normalized.slice(0, maxChars)}…(truncated, total=${normalized.length})`;
+  return `${normalized.slice(
+    0,
+    maxChars
+  )}…(truncated, total=${normalized.length})`;
 }
 
 export interface GenerateFixOptions {
-  onDelta?: (delta: { kind: 'thinking' | 'content'; text: string }) => void;
+  stream?: boolean;
+  onDelta?: (delta: {
+    kind: 'thinking' | 'content';
+    text: string;
+  }) => void;
+  token?: vscode.CancellationToken;
 }
