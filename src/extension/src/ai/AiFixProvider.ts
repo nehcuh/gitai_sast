@@ -17,7 +17,8 @@ export class AiFixProvider {
   async generateFix(
     finding: Finding,
     codeSnippet: string,
-    context?: any
+    context?: any,
+    options?: GenerateFixOptions
   ): Promise<AiFixResult> {
     const settings = this.getAiSettings();
     const debugEnabled = settings.debugLogging;
@@ -55,6 +56,7 @@ export class AiFixProvider {
 
       const textParts: string[] = [];
       for await (const part of response.text) {
+        options?.onDelta?.({ kind: 'content', text: part });
         textParts.push(part);
       }
       const text = textParts.join('');
@@ -76,6 +78,8 @@ export class AiFixProvider {
       output.debug(`[AI] user=${truncateForLog(prompts.user, settings.debugMaxChars)}`);
     }
 
+    const thinkingParts: string[] = [];
+
     const text = await createChatCompletion(
       {
         apiUrl: settings.apiUrl,
@@ -83,6 +87,16 @@ export class AiFixProvider {
         model: settings.modelName,
         temperature: settings.temperature,
         timeoutMs: settings.requestTimeoutMs,
+        stream: settings.stream,
+        onDelta: options?.onDelta
+          ? (text) => options.onDelta?.({ kind: 'content', text })
+          : undefined,
+        onThinkingDelta: settings.enableThinking
+          ? (text) => {
+              thinkingParts.push(text);
+              options?.onDelta?.({ kind: 'thinking', text });
+            }
+          : undefined,
         debugLog: debugEnabled ? (line) => output.debug(line) : undefined,
         debugMaxChars: settings.debugMaxChars,
       },
@@ -100,6 +114,7 @@ export class AiFixProvider {
       suggestion: text,
       code: this.extractCode(text),
       provider: 'openai-compatible',
+      thinking: thinkingParts.join('').trim() || undefined,
     };
   }
 
@@ -113,16 +128,24 @@ export class AiFixProvider {
   ): { system: string; user: string } {
     const settings = this.getAiSettings();
 
-    const defaultSystem =
-      [
-        '你是一名资深应用安全（AppSec）工程师。请基于提供的代码片段给出安全、最小化且可落地的修复方案。',
-        '',
-        '输出要求：',
-        '- 解释部分使用中文输出，但所有专业术语使用英文（例如 vulnerability type、attack vector、threat model、root cause、taint flow、source/sink/sanitizer、input validation、encoding/escaping、SQL injection、XSS、CSRF、SSRF、RCE、CWE/OWASP、以及库名/API/函数/类名等）。',
-        '- 修复代码放在最后，并且只输出一个 ``` 代码块（不要输出 diff）。',
-        '- 代码块内保持目标语言的常见格式与正确缩进；尽量最小改动，不引入新问题。',
-        '- 如果上下文不足，请说明你的假设，并给出最小可行修复（minimal viable fix）。',
-      ].join('\n');
+    const defaultSystem = settings.enableThinking
+      ? [
+          '你是一名资深应用安全（AppSec）工程师。请基于提供的代码片段给出安全、最小化且可落地的修复方案。',
+          '',
+          '输出要求：',
+          '- 解释部分使用中文输出，但所有专业术语使用英文（例如 vulnerability type、attack vector、threat model、root cause、taint flow、source/sink/sanitizer、input validation、encoding/escaping、SQL injection、XSS、CSRF、SSRF、RCE、CWE/OWASP、以及库名/API/函数/类名等）。',
+          '- 修复代码放在最后，并且只输出一个 ``` 代码块（不要输出 diff）。',
+          '- 代码块内保持目标语言的常见格式与正确缩进；尽量最小改动，不引入新问题。',
+          '- 如果上下文不足，请说明你的假设，并给出最小可行修复（minimal viable fix）。',
+        ].join('\n')
+      : [
+          '你是一名资深应用安全（AppSec）工程师。请基于提供的代码片段给出安全、最小化且可落地的修复方案。',
+          '',
+          '输出要求：',
+          '- 不要输出思考过程、推理过程或长解释；最多 3 条要点（可选）。',
+          '- 修复代码放在最后，并且只输出一个 ``` 代码块（不要输出 diff）。',
+          '- 代码块内保持目标语言的常见格式与正确缩进；尽量最小改动，不引入新问题。',
+        ].join('\n');
 
     const variables: Record<string, string> = {
       rule_id: finding.rule_id,
@@ -157,9 +180,15 @@ export class AiFixProvider {
     }
 
     user += `\n## Instructions\n`;
-    user += `1. 用中文解释：root cause、可能的 attack scenario、修复思路与 trade-offs（专业术语用英文，不要翻译）。\n`;
-    user += `2. 给出修复后的代码（仅一个代码块），保证缩进/格式正确，可直接替换或粘贴。\n`;
-    user += `3. 尽量保持最小改动；不要引入与该问题无关的重构。\n`;
+    if (settings.enableThinking) {
+      user += `1. 用中文解释：root cause、可能的 attack scenario、修复思路与 trade-offs（专业术语用英文，不要翻译）。\n`;
+      user += `2. 给出修复后的代码（仅一个代码块），保证缩进/格式正确，可直接替换或粘贴。\n`;
+      user += `3. 尽量保持最小改动；不要引入与该问题无关的重构。\n`;
+    } else {
+      user += `1. 直接给出修复后的代码（仅一个代码块），保证缩进/格式正确，可直接替换或粘贴。\n`;
+      user += `2. 如需说明，最多 3 条要点；不要输出长解释/推理过程。\n`;
+      user += `3. 尽量保持最小改动；不要引入与该问题无关的重构。\n`;
+    }
 
     return { system, user: user.trim() };
   }
@@ -239,6 +268,8 @@ export class AiFixProvider {
       modelName: config.get<string>('modelName', '') || '',
       temperature: config.get<number>('temperature', 0.2),
       requestTimeoutMs: config.get<number>('requestTimeoutMs', 60000),
+      stream: config.get<boolean>('stream', true),
+      enableThinking: config.get<boolean>('enableThinking', false),
       systemPrompt: config.get<string>('systemPrompt', '') || '',
       userPromptTemplate: config.get<string>('userPromptTemplate', '') || '',
       debugLogging: config.get<boolean>('debugLogging', false),
@@ -256,6 +287,8 @@ interface AiSettings {
   modelName: string;
   temperature: number;
   requestTimeoutMs: number;
+  stream: boolean;
+  enableThinking: boolean;
   systemPrompt: string;
   userPromptTemplate: string;
   debugLogging: boolean;
@@ -282,6 +315,7 @@ export interface AiFixResult {
   suggestion: string;
   code: string;
   provider: string;
+  thinking?: string;
 }
 
 function truncateForLog(text: string, maxChars: number): string {
@@ -290,4 +324,8 @@ function truncateForLog(text: string, maxChars: number): string {
     return normalized;
   }
   return `${normalized.slice(0, maxChars)}…(truncated, total=${normalized.length})`;
+}
+
+export interface GenerateFixOptions {
+  onDelta?: (delta: { kind: 'thinking' | 'content'; text: string }) => void;
 }
