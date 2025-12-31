@@ -235,13 +235,20 @@ pub struct RemoteSastConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RemoteUploadRequest {
     pub project_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub project_version_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub white_list: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub issue_view_type: Option<String>,
 }
 
@@ -251,6 +258,7 @@ pub struct RemoteUploadResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RemoteScanRequest {
     pub source_path: String,
     #[serde(flatten)]
@@ -277,11 +285,8 @@ pub struct RemoteScanResultResponse {
     pub status: i32,
     pub info: String,
     pub scan_progress: Option<i32>,
-    pub risk_high_count: i32,
-    pub risk_medium_count: i32,
-    pub risk_low_count: i32,
-    pub risk_total_count: i32,
-    pub score: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scan_log: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -298,9 +303,8 @@ pub struct RemoteResultListResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RemoteResultRecord {
-    pub result_id: String,
-    pub lang: String,
     pub issue_path: String,
     pub issue_zh_name: String,
     pub issue_en_name: String,

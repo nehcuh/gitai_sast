@@ -86,8 +86,7 @@ function getRemoteUserId(): string {
     return explicit.trim();
   }
 
-  // Backward compatibility: older setting name.
-  return (config.get<string>('remoteToken', '') || '').trim();
+  return '';
 }
 
 function mapSeverityThreshold(value: string): string {

@@ -1,7 +1,7 @@
 use crate::core::types::{
-    RemoteSastConfig, RemoteUploadRequest, RemoteUploadResponse, RemoteScanRequest,
-    RemoteScanResponse, RemoteScanResultRequest, RemoteScanResultResponse,
-    RemoteResultListRequest, RemoteResultListResponse, RemoteResultRecord,
+    RemoteSastConfig, RemoteUploadRequest, RemoteScanRequest,
+    RemoteScanResponse, RemoteScanResultResponse,
+    RemoteResultListResponse, RemoteResultRecord,
     ScanEnvelope, Finding, Location, ScanStatus, IgnoreItem, ScanConfig
 };
 use crate::scanner::{ScanResult, ScanError, ScannerScanResult};
@@ -9,9 +9,8 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{Cursor, Write};
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use tokio::select;
 use tracing::{info, debug, warn};
 use uuid::Uuid;
 use md5::{Md5, Digest};
@@ -112,7 +111,8 @@ impl RemoteSastScanner {
                 Duration::from_secs(60),
                 tokio::task::spawn_blocking({
                     let files = files.clone();
-                    move || Self::create_zip_static(&files)
+                    let root = root.clone();
+                    move || Self::create_zip_static(&root, &files)
                 })
             )
             .await
@@ -175,7 +175,7 @@ impl RemoteSastScanner {
             info!("Processing {} findings...", result_list.total);
             let findings = tokio::time::timeout(
                 Duration::from_secs(300),
-                self.convert_to_findings(result_list, &project_version_id)
+                self.convert_to_findings(&root, result_list, &project_version_id)
             )
             .await
             .map_err(|_| ScanError::Timeout(Duration::from_secs(300)))??;
@@ -248,12 +248,11 @@ impl RemoteSastScanner {
         let url = format!("{}/oscap/sca-api/scap/scaProject/myapis/putLocalProject", self.config.url);
         
         let timestamp = chrono::Utc::now().timestamp().to_string();
-        let signature = Self::generate_signature_static(&json!(scan_request), &timestamp)?;
-        
         let mut request_body = json!(scan_request);
         request_body["timestamp"] = json!(timestamp);
-        request_body["signature"] = json!(signature);
         request_body["userId"] = json!(self.config.user_id.clone());
+        let signature = Self::generate_signature_static(&request_body)?;
+        request_body["signature"] = json!(signature);
         
         info!("Submitting scan request to remote SAST: {}", url);
         debug!("Request body: {}", request_body);
@@ -276,27 +275,47 @@ impl RemoteSastScanner {
         let result_info = response_json["resultInfo"].as_object()
             .context("Missing resultInfo in scan response")
             .map_err(|e| ScanError::Results(e.to_string()))?;
+
+        let project_id = result_info
+            .get("projectId")
+            .and_then(|v| v.as_str())
+            .context("Missing projectId")
+            .map_err(|e| ScanError::Results(e.to_string()))?
+            .to_string();
+
+        let project_version_id = result_info
+            .get("projectVersionId")
+            .and_then(|v| v.as_str())
+            .context("Missing projectVersionId")
+            .map_err(|e| ScanError::Results(e.to_string()))?
+            .to_string();
+
+        let status = result_info
+            .get("status")
+            .and_then(|v| v.as_i64())
+            .context("Missing status")
+            .map_err(|e| ScanError::Results(e.to_string()))? as i32;
+
+        let info_message = result_info
+            .get("info")
+            .and_then(|v| v.as_str())
+            .context("Missing info")
+            .map_err(|e| ScanError::Results(e.to_string()))?
+            .to_string();
+
+        let details_url = result_info
+            .get("detailsUrl")
+            .and_then(|v| v.as_str())
+            .context("Missing detailsUrl")
+            .map_err(|e| ScanError::Results(e.to_string()))?
+            .to_string();
         
         let scan_response = RemoteScanResponse {
-            project_id: result_info["projectId"].as_str()
-                .context("Missing projectId")
-                .map_err(|e| ScanError::Results(e.to_string()))?
-                .to_string(),
-            project_version_id: result_info["projectVersionId"].as_str()
-                .context("Missing projectVersionId")
-                .map_err(|e| ScanError::Results(e.to_string()))?
-                .to_string(),
-            status: result_info["status"].as_i64()
-                .context("Missing status")
-                .map_err(|e| ScanError::Results(e.to_string()))? as i32,
-            info: result_info["info"].as_str()
-                .context("Missing info")
-                .map_err(|e| ScanError::Results(e.to_string()))?
-                .to_string(),
-            details_url: result_info["detailsUrl"].as_str()
-                .context("Missing detailsUrl")
-                .map_err(|e| ScanError::Results(e.to_string()))?
-                .to_string(),
+            project_id,
+            project_version_id,
+            status,
+            info: info_message,
+            details_url,
         };
         
         info!("Scan submitted successfully. Task ID: {}", scan_response.project_version_id);
@@ -309,14 +328,13 @@ impl RemoteSastScanner {
         let url = format!("{}/oscap/sca-api/scap/scaProject/myapis/getScanResult", self.config.url);
         
         let timestamp = chrono::Utc::now().timestamp().to_string();
-        let signature = Self::generate_signature_static(&json!({"projectVersionId": project_version_id}), &timestamp)?;
-        
-        let request_body = json!({
+        let mut request_body = json!({
             "projectVersionId": project_version_id,
             "timestamp": timestamp,
-            "signature": signature,
             "userId": self.config.user_id,
         });
+        let signature = Self::generate_signature_static(&request_body)?;
+        request_body["signature"] = json!(signature);
         
         let response = self.client
             .post(&url)
@@ -338,29 +356,25 @@ impl RemoteSastScanner {
             .map_err(|e| ScanError::Results(e.to_string()))?;
         
         Ok(RemoteScanResultResponse {
-            status: result_info["status"].as_i64()
+            status: result_info
+                .get("status")
+                .and_then(|v| v.as_i64())
                 .context("Missing status")
                 .map_err(|e| ScanError::Results(e.to_string()))? as i32,
-            info: result_info["info"].as_str()
+            info: result_info
+                .get("info")
+                .and_then(|v| v.as_str())
                 .context("Missing info")
                 .map_err(|e| ScanError::Results(e.to_string()))?
                 .to_string(),
-            scan_progress: result_info["scanProgress"].as_i64().map(|v| v as i32),
-            risk_high_count: result_info["riskHighCount"].as_i64()
-                .context("Missing riskHighCount")
-                .map_err(|e| ScanError::Results(e.to_string()))? as i32,
-            risk_medium_count: result_info["riskMediumCount"].as_i64()
-                .context("Missing riskMediumCount")
-                .map_err(|e| ScanError::Results(e.to_string()))? as i32,
-            risk_low_count: result_info["riskLowCount"].as_i64()
-                .context("Missing riskLowCount")
-                .map_err(|e| ScanError::Results(e.to_string()))? as i32,
-            risk_total_count: result_info["riskTotalCount"].as_i64()
-                .context("Missing riskTotalCount")
-                .map_err(|e| ScanError::Results(e.to_string()))? as i32,
-            score: result_info["score"].as_f64()
-                .context("Missing score")
-                .map_err(|e| ScanError::Results(e.to_string()))?,
+            scan_progress: result_info
+                .get("scanProgress")
+                .and_then(|v| v.as_i64())
+                .map(|v| v as i32),
+            scan_log: result_info
+                .get("scanLog")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
         })
     }
     
@@ -369,14 +383,15 @@ impl RemoteSastScanner {
         let url = format!("{}/oscap/sca-api/scap/scaProject/myapis/getResultList", self.config.url);
         
         let timestamp = chrono::Utc::now().timestamp().to_string();
-        let signature = Self::generate_signature_static(&json!({"projectVersionId": project_version_id}), &timestamp)?;
-        
-        let request_body = json!({
+        let mut request_body = json!({
             "projectVersionId": project_version_id,
             "timestamp": timestamp,
-            "signature": signature,
             "userId": self.config.user_id,
+            "pageNo": 1,
+            "pageSize": 1000,
         });
+        let signature = Self::generate_signature_static(&request_body)?;
+        request_body["signature"] = json!(signature);
         
         let response = self.client
             .post(&url)
@@ -396,17 +411,25 @@ impl RemoteSastScanner {
         let result = response_json["result"].as_object()
             .context("Missing result")
             .map_err(|e| ScanError::Results(e.to_string()))?;
-        
-        let records: Vec<RemoteResultRecord> = serde_json::from_value(result["records"].clone())
-            .context("Failed to parse records")
-            .map_err(|e| ScanError::Results(e.to_string()))?;
-        
-        Ok(RemoteResultListResponse {
-            total: result["total"].as_i64()
-                .context("Missing total")
-                .map_err(|e| ScanError::Results(e.to_string()))? as i32,
-            records,
-        })
+
+        let records_value = result
+            .get("records")
+            .cloned()
+            .unwrap_or_else(|| Value::Array(Vec::new()));
+        let records: Vec<RemoteResultRecord> = if records_value.is_null() {
+            Vec::new()
+        } else {
+            serde_json::from_value(records_value)
+                .context("Failed to parse records")
+                .map_err(|e| ScanError::Results(e.to_string()))?
+        };
+
+        let total = result
+            .get("total")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(records.len() as i64) as i32;
+
+        Ok(RemoteResultListResponse { total, records })
     }
     
     /// 获取文件代码（带超时）
@@ -414,18 +437,14 @@ impl RemoteSastScanner {
         let url = format!("{}/oscap/sca-api/scap/scaScanResult/myapis/getFileCode", self.config.url);
         
         let timestamp = chrono::Utc::now().timestamp().to_string();
-        let signature = Self::generate_signature_static(
-            &json!({"projectVersionId": project_version_id, "filePath": file_path}), 
-            &timestamp
-        )?;
-        
-        let request_body = json!({
+        let mut request_body = json!({
             "projectVersionId": project_version_id,
             "filePath": file_path,
             "timestamp": timestamp,
-            "signature": signature,
             "userId": self.config.user_id,
         });
+        let signature = Self::generate_signature_static(&request_body)?;
+        request_body["signature"] = json!(signature);
         
         let response = self.client
             .post(&url)
@@ -475,7 +494,15 @@ impl RemoteSastScanner {
                             return Ok(result);
                         }
                         5 => {
-                            return Err(ScanError::ScanFailed(result.info));
+                            let mut message = result.info.clone();
+                            if let Some(log) = result.scan_log.as_deref() {
+                                let trimmed = log.trim();
+                                if !trimmed.is_empty() {
+                                    message.push_str("\n");
+                                    message.push_str(&truncate_scan_log(trimmed, 2000));
+                                }
+                            }
+                            return Err(ScanError::ScanFailed(message));
                         }
                         _ => {
                             info!("Scan in progress (attempt {}/{}): status={}, info={}", 
@@ -506,6 +533,7 @@ impl RemoteSastScanner {
     /// 并发转换为 Finding
     async fn convert_to_findings(
         &self,
+        root: &str,
         result_list: RemoteResultListResponse,
         project_version_id: &str,
     ) -> ScannerScanResult<Vec<Finding>> {
@@ -513,6 +541,7 @@ impl RemoteSastScanner {
         let config_url = self.config.url.clone();
         let user_id = self.config.user_id.clone();
         let project_version_id = project_version_id.to_string();
+        let root_path = root.to_string();
         let concurrency_limit = 10; // 限制并发数量
         
         let findings = stream::iter(result_list.records)
@@ -521,15 +550,19 @@ impl RemoteSastScanner {
                 let config_url = config_url.clone();
                 let user_id = user_id.clone();
                 let project_version_id = project_version_id.clone();
+                let root_path = root_path.clone();
                 
                 async move {
-                    let file_path = record.issue_path.split('(').next().unwrap_or("").to_string();
+                    let remote_file_path = record.issue_path.split('(').next().unwrap_or("").to_string();
                     let line = record.issue_path
                         .split('(')
                         .nth(1)
                         .and_then(|s| s.split(')').next())
                         .and_then(|s| s.parse::<u32>().ok())
-                        .unwrap_or(0);
+                        .unwrap_or(1)
+                        .max(1);
+
+                    let local_file_path = resolve_local_path(&root_path, &remote_file_path);
                     
                     // 并发获取代码片段（带超时）
                     let code_snippet = tokio::time::timeout(
@@ -539,7 +572,7 @@ impl RemoteSastScanner {
                             &config_url,
                             &user_id,
                             &project_version_id,
-                            file_path.clone()
+                            remote_file_path.clone()
                         )
                     )
                     .await
@@ -554,7 +587,7 @@ impl RemoteSastScanner {
                     })
                     .unwrap_or_else(|| {
                         // 如果获取失败，使用空字符串
-                        warn!("Failed to get code snippet for {}:{}", file_path, line);
+                        warn!("Failed to get code snippet for {}:{}", remote_file_path, line);
                         String::new()
                     });
                     
@@ -566,7 +599,7 @@ impl RemoteSastScanner {
                         title: record.issue_zh_name.clone(),
                         description: record.issue_en_name.clone(),
                         location: Location {
-                            file: file_path,
+                            file: local_file_path,
                             line,
                             column: None,
                         },
@@ -594,18 +627,14 @@ impl RemoteSastScanner {
         let url = format!("{}/oscap/sca-api/scap/scaScanResult/myapis/getFileCode", config_url);
         
         let timestamp = chrono::Utc::now().timestamp().to_string();
-        let signature = Self::generate_signature_static(
-            &json!({"projectVersionId": project_version_id, "filePath": file_path}), 
-            &timestamp
-        )?;
-        
-        let request_body = json!({
+        let mut request_body = json!({
             "projectVersionId": project_version_id,
             "filePath": file_path,
             "timestamp": timestamp,
-            "signature": signature,
             "userId": user_id,
         });
+        let signature = Self::generate_signature_static(&request_body)?;
+        request_body["signature"] = json!(signature);
         
         let response = client
             .post(&url)
@@ -642,12 +671,12 @@ impl RemoteSastScanner {
     }
     
     /// 静态方法：改进的 ZIP 文件创建（带压缩级别）
-    fn create_zip_static(files: &HashMap<String, String>) -> Result<Vec<u8>, std::io::Error> {
+    fn create_zip_static(root: &str, files: &HashMap<String, String>) -> Result<Vec<u8>, std::io::Error> {
         let mut buffer = Cursor::new(Vec::new());
         let mut zip = ZipWriter::new(&mut buffer);
         
         for (file_path, content) in files {
-            let path = file_path.strip_prefix("/").unwrap_or(file_path);
+            let entry_path = resolve_zip_entry_path(root, file_path);
             
             // 根据文件大小选择压缩级别
             let options = if content.len() > 1024 * 1024 { // >1MB
@@ -656,7 +685,7 @@ impl RemoteSastScanner {
                 SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated)
             };
             
-            zip.start_file(path, options)?;
+            zip.start_file(entry_path, options)?;
             zip.write_all(content.as_bytes())?;
         }
         
@@ -666,36 +695,113 @@ impl RemoteSastScanner {
     }
     
     /// 静态方法：生成签名
-    fn generate_signature_static(params: &Value, timestamp: &str) -> ScannerScanResult<String> {
-        // 移除空格、换行
-        let params_str = params.to_string().replace([' ', '\n', '\r'], "");
-        
-        // 解析并排序
-        let mut params_map: serde_json::Map<String, Value> = serde_json::from_str(&params_str)?;
-        params_map.remove("signature");
-        
-        let mut sorted_params: Vec<_> = params_map.into_iter().collect();
-        sorted_params.sort_by(|a, b| a.0.cmp(&b.0));
-        
-        // 构建签名字符串
+    fn generate_signature_static(params: &Value) -> ScannerScanResult<String> {
+        // Follows the platform spec: sort top-level keys, concatenate values (strings without quotes),
+        // then append md5(timestamp), then md5(all).
+        let obj = params
+            .as_object()
+            .context("Signature params must be a JSON object")
+            .map_err(|e| ScanError::Signature(e.to_string()))?;
+
+        let timestamp_value = obj
+            .get("timestamp")
+            .context("Missing timestamp for signature")
+            .map_err(|e| ScanError::Signature(e.to_string()))?;
+        let timestamp_str = value_as_signature_string(timestamp_value);
+
+        let mut keys: Vec<&String> = obj.keys().collect();
+        keys.retain(|k| k.as_str() != "signature");
+        keys.sort();
+
         let mut base_string = String::new();
-        for (_key, value) in sorted_params {
-            base_string.push_str(&value.to_string());
+        for key in keys {
+            if let Some(value) = obj.get(key) {
+                append_value_for_signature(value, &mut base_string);
+            }
         }
-        
-        // 添加时间戳 MD5
+
         let mut md5 = Md5::new();
-        md5.update(timestamp.as_bytes());
+        md5.update(timestamp_str.as_bytes());
         let timestamp_md5 = format!("{:x}", md5.finalize());
         base_string.push_str(&timestamp_md5);
-        
-        // 计算 MD5
+
         let mut md5 = Md5::new();
         md5.update(base_string.as_bytes());
-        let signature = format!("{:x}", md5.finalize());
-        
-        Ok(signature)
+        Ok(format!("{:x}", md5.finalize()))
     }
+}
+
+fn value_as_signature_string(value: &Value) -> String {
+    match value {
+        Value::Null => "null".to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => s.clone(),
+        Value::Array(_) | Value::Object(_) => value.to_string(),
+    }
+}
+
+fn append_value_for_signature(value: &Value, out: &mut String) {
+    match value {
+        Value::Null => out.push_str("null"),
+        Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        Value::Number(n) => out.push_str(&n.to_string()),
+        Value::String(s) => out.push_str(s),
+        Value::Array(items) => {
+            for item in items {
+                append_value_for_signature(item, out);
+            }
+        }
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            for key in keys {
+                if let Some(value) = map.get(key) {
+                    append_value_for_signature(value, out);
+                }
+            }
+        }
+    }
+}
+
+fn truncate_scan_log(log: &str, max_chars: usize) -> String {
+    if log.len() <= max_chars {
+        return log.to_string();
+    }
+    format!("{}...(truncated, total={})", &log[..max_chars], log.len())
+}
+
+fn resolve_zip_entry_path(root: &str, file_path: &str) -> String {
+    let trimmed_root = root.trim();
+    let file_path_obj = Path::new(file_path);
+
+    let relative: PathBuf = if !trimmed_root.is_empty() {
+        let root_path = Path::new(trimmed_root);
+        file_path_obj
+            .strip_prefix(root_path)
+            .unwrap_or(file_path_obj)
+            .to_path_buf()
+    } else {
+        file_path_obj.to_path_buf()
+    };
+
+    let mut entry = relative.to_string_lossy().replace('\\', "/");
+    entry = entry.trim_start_matches('/').to_string();
+    if entry.is_empty() {
+        entry = "file".to_string();
+    }
+    entry
+}
+
+fn resolve_local_path(root: &str, remote_path: &str) -> String {
+    let trimmed_root = root.trim();
+    let trimmed_remote = remote_path.trim();
+    if trimmed_root.is_empty() || trimmed_remote.is_empty() {
+        return trimmed_remote.to_string();
+    }
+
+    let remote_rel = trimmed_remote.trim_start_matches('/');
+    Path::new(trimmed_root).join(remote_rel).to_string_lossy().to_string()
 }
 
 fn add_root_certificates_from_pem_bytes(
@@ -772,6 +878,7 @@ fn normalize_remote_base_url(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn parses_custom_ca_pem() {
@@ -804,5 +911,19 @@ nITahhhOJAHngDtZXwEHo6OGCp4X
         let builder = reqwest::Client::builder();
         let result = add_root_certificates_from_pem_bytes(builder, pem.as_bytes());
         assert!(result.is_ok(), "expected PEM to import, got: {:?}", result.err());
+    }
+
+    #[test]
+    fn signature_matches_spec_example() {
+        // Example from the platform API spec.
+        let params = json!({
+            "timestamp": 1460531942,
+            "op": "Dispatch.list",
+            "apikey": "fb097281c447a13c728f0766d8895841"
+        });
+
+        let signature = RemoteSastScanner::generate_signature_static(&params)
+            .expect("signature generation should succeed");
+        assert_eq!(signature, "daca148d62d5e4cac62856aed4b7f6c1");
     }
 }
