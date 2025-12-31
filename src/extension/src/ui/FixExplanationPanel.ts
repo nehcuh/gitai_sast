@@ -64,7 +64,7 @@ export class FixExplanationPanel {
     fixCode?: string
   ) {
     this.panel = panel;
-    this.fixCode = fixCode || this.extractCodeFromSuggestion(suggestion);
+    this.fixCode = fixCode || this.extractCodeFromSuggestion(suggestion) || '';
     this.panel.webview.html = this.getHtml();
 
     // 监听面板关闭事件
@@ -90,7 +90,7 @@ export class FixExplanationPanel {
     this.finding = finding;
     this.suggestion = suggestion;
     this.thinking = thinking;
-    this.fixCode = fixCode || this.extractCodeFromSuggestion(suggestion);
+    this.fixCode = fixCode || this.extractCodeFromSuggestion(suggestion) || '';
     this.panel.webview.html = this.getHtml();
   }
 
@@ -98,6 +98,30 @@ export class FixExplanationPanel {
    * 生成 HTML 内容
    */
   private getHtml(): string {
+    const thinkingHtml = this.thinking
+      ? `
+  <div class="thinking">
+    <h3>🧠 AI Reasoning</h3>
+    <pre><code>${this.escapeHtml(this.thinking)}</code></pre>
+  </div>
+  `
+      : '';
+
+    const fixCodeHtml = this.fixCode
+      ? `
+  <div>
+    <h3>🔧 Fix Code</h3>
+    <pre><code>${this.escapeHtml(this.fixCode)}</code></pre>
+  </div>
+  `
+      : '';
+
+    const applyFixButton = this.fixCode
+      ? `
+    <button class="btn-primary" onclick="applyFix()">Apply Fix</button>
+    `
+      : '';
+
     return `<!DOCTYPE html>
 <html>
 <head>
@@ -247,35 +271,23 @@ export class FixExplanationPanel {
     <p><strong>Description:</strong> ${this.escapeHtml(this.finding.description)}</p>
   </div>
 
-  ${this.thinking ? `
-  <div class="thinking">
-    <h3>🧠 AI Reasoning</h3>
-    <pre><code>${this.escapeHtml(this.thinking)}</code></pre>
-  </div>
-  ` : ''}
+  ${thinkingHtml}
 
   <div class="suggestion">
     <h3>💡 AI Suggestion</h3>
     <div>${this.escapeHtml(this.suggestion)}</div>
   </div>
 
-  ${this.fixCode ? `
-  <div>
-    <h3>🔧 Fix Code</h3>
-    <pre><code>${this.escapeHtml(this.fixCode)}</code></pre>
-  </div>
-  ` : ''}
+  ${fixCodeHtml}
 
   <div class="actions">
-    ${this.fixCode ? `
-    <button class="btn-primary" onclick="applyFix()">Apply Fix</button>
-    ` : ''}
+    ${applyFixButton}
     <button class="btn-secondary" onclick="copyCode()">Copy Code</button>
     <button class="btn-secondary" onclick="dismiss()">Dismiss</button>
   </div>
 
   <div class="info">
-    Click "Apply Fix" to automatically apply the fix to the editor.
+    Click "Apply Fix" to automatically apply fix to editor.
   </div>
 
   <script>
@@ -356,7 +368,7 @@ export class FixExplanationPanel {
       vscode.window.showInformationMessage('Fix applied successfully');
     } else {
       vscode.window.showWarningMessage(
-        'Failed to apply fix automatically. Please copy the code and apply it manually.'
+        'Failed to apply fix automatically. Please copy code and apply it manually.'
       );
     }
   }
