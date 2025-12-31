@@ -31,7 +31,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // 注册命令
   registerScanCommands(context, sastScanner, diagnosticManager, aiFixProvider);
-  registerAiFixCommand(context, aiFixProvider);
+  registerAiFixCommand(context, aiFixProvider, mcpClient);
 
   // 注册自动扫描
   registerAutoScan(context, sastScanner, diagnosticManager);

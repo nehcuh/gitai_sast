@@ -80,6 +80,7 @@ export interface Finding {
   location: Location;
   code_snippet: string;
   fix?: Fix;
+  issue_content?: string;
   provider: string;
 }
 
