@@ -1,12 +1,30 @@
 import * as vscode from 'vscode';
+
+// Core modules
 import { McpClient } from './core/McpClient';
 import { SastScanner } from './core/SastScanner';
 import { DiagnosticManager } from './core/DiagnosticManager';
+import { initOutputLogger } from './core/OutputLogger';
+
+// AI modules
 import { AiFixProvider } from './ai/AiFixProvider';
+
+// Commands modules
 import { registerScanCommands } from './commands/scan';
 import { registerAiFixCommand } from './commands/aiFix';
+import { registerShowResultsCommand } from './commands/showResults';
+import { registerShowDetailsCommand } from './commands/showDetails';
+import { registerExplainInChatCommand } from './commands/explainInChat';
+import { registerViewTaintPathCommand } from './commands/viewTaintPath';
+import { registerIgnoreCommands } from './commands/ignore';
+import { registerRefreshDiagnosticsCommand } from './commands/refreshDiagnostics';
+
+// UI modules
+import { FixDiffViewer } from './ui/FixDiffViewer';
+import { FixExplanationPanel } from './ui/FixExplanationPanel';
+
+// Integrations modules
 import { SemgrepBridge } from './integrations/SemgrepBridge';
-import { initOutputLogger } from './core/OutputLogger';
 
 /**
  * Extension 激活
@@ -14,24 +32,34 @@ import { initOutputLogger } from './core/OutputLogger';
 export async function activate(context: vscode.ExtensionContext) {
   console.log('[GitAI SAST] Extension is activating...');
 
+  // 初始化输出日志
   initOutputLogger(context);
 
   // 获取配置
   const config = vscode.workspace.getConfiguration('gitai.sast');
   const mcpServerPath = config.get<string>('mcpServerPath') || '';
 
-  // 初始化 MCP Client
-  const mcpClient = new McpClient(mcpServerPath);
-
   // 初始化核心组件
+  const mcpClient = new McpClient(mcpServerPath);
   const sastScanner = new SastScanner(mcpClient);
   const diagnosticManager = new DiagnosticManager(context);
   const aiFixProvider = new AiFixProvider();
+
+  // 初始化 Semgrep Bridge
   const semgrepBridge = new SemgrepBridge(context);
 
   // 注册命令
   registerScanCommands(context, sastScanner, diagnosticManager, aiFixProvider);
   registerAiFixCommand(context, aiFixProvider, mcpClient);
+  registerShowResultsCommand(context, diagnosticManager);
+  registerShowDetailsCommand(context);
+  registerExplainInChatCommand(context);
+  registerViewTaintPathCommand(context, mcpClient);
+  registerIgnoreCommands(context);
+  registerRefreshDiagnosticsCommand(context, sastScanner, diagnosticManager);
+
+  // 注册 Diff 查看器和解释面板命令
+  registerDiffViewerCommands(context, aiFixProvider);
 
   // 注册自动扫描
   registerAutoScan(context, sastScanner, diagnosticManager);
@@ -39,6 +67,15 @@ export async function activate(context: vscode.ExtensionContext) {
   // 尝试复用 Semgrep 插件（作为 Opengrep LSP Client）
   void semgrepBridge.maybeEnableOpengrepBackend();
   context.subscriptions.push(semgrepBridge);
+
+  // 检查 AI 可用性（不阻塞激活）
+  void aiFixProvider.checkAvailability().then((aiAvailable) => {
+    if (!aiAvailable) {
+      console.log('[GitAI SAST] AI not available');
+    } else {
+      console.log('[GitAI SAST] AI available');
+    }
+  });
 
   // MCP Server: 配置变更时更新路径并尝试重连
   const configDisposable = vscode.workspace.onDidChangeConfiguration((e) => {
@@ -78,21 +115,7 @@ export async function activate(context: vscode.ExtensionContext) {
     },
   });
 
-  // 检查 AI 可用性（不阻塞激活）
-  void aiFixProvider.checkAvailability().then(
-    (aiAvailable) => {
-      if (!aiAvailable) {
-        console.log('[GitAI SAST] AI model not available; AI fix features disabled');
-      } else {
-        console.log('[GitAI SAST] AI model available');
-      }
-    },
-    (error) => {
-      console.error('[GitAI SAST] Failed to check AI availability:', error);
-    }
-  );
-
-  console.log('[GitAI SAST] Extension activated');
+  console.log('[GitAI SAST] Extension activated successfully.');
 }
 
 /**
@@ -100,7 +123,67 @@ export async function activate(context: vscode.ExtensionContext) {
  */
 export function deactivate() {
   console.log('[GitAI SAST] Extension is deactivating...');
-  // TODO: 清理资源
+  // 清理资源
+  // Note: FixExplanationPanel instances are managed automatically
+}
+
+/**
+ * 注册 Diff 查看器命令
+ */
+function registerDiffViewerCommands(
+  context: vscode.ExtensionContext,
+  aiFixProvider: AiFixProvider
+): void {
+  // View Diff 命令
+  const viewDiffDisposable = vscode.commands.registerCommand(
+    'gitai.sast.viewDiff',
+    async (finding: any) => {
+      if (!finding || !finding.uri) {
+        vscode.window.showErrorMessage('No vulnerability selected for diff view');
+        return;
+      }
+
+      try {
+        const suggestion = await aiFixProvider.generateFix(
+          finding,
+          finding.code_snippet || ''
+        );
+
+        await FixDiffViewer.showFixDiff(
+          finding.uri,
+          finding,
+          suggestion.code,
+          suggestion.suggestion
+        );
+      } catch (error) {
+        vscode.window.showErrorMessage(`Failed to show diff: ${error}`);
+      }
+    }
+  );
+  context.subscriptions.push(viewDiffDisposable);
+
+  // Show Explanation 命令
+  const showExplanationDisposable = vscode.commands.registerCommand(
+    'gitai.sast.showExplanation',
+    async (finding: any) => {
+      if (!finding || !finding.uri) {
+        vscode.window.showErrorMessage('No vulnerability selected for explanation');
+        return;
+      }
+
+      try {
+        const suggestion = await aiFixProvider.generateFix(
+          finding,
+          finding.code_snippet || ''
+        );
+
+        await FixExplanationPanel.show(finding, suggestion.suggestion);
+      } catch (error) {
+        vscode.window.showErrorMessage(`Failed to show explanation: ${error}`);
+      }
+    }
+  );
+  context.subscriptions.push(showExplanationDisposable);
 }
 
 /**
@@ -108,35 +191,33 @@ export function deactivate() {
  */
 function registerAutoScan(
   context: vscode.ExtensionContext,
-  scanner: SastScanner,
-  diagnostics: DiagnosticManager
-) {
-  const autoScanEnabled = vscode.workspace.getConfiguration('gitai.sast')
+  sastScanner: SastScanner,
+  diagnosticManager: DiagnosticManager
+): void {
+  const autoScanEnabled = vscode.workspace
+    .getConfiguration('gitai.sast')
     .get<boolean>('enableAutoScan', true);
 
   if (!autoScanEnabled) {
     return;
   }
 
-  // 监听文件保存事件
-  const saveDisposable = vscode.workspace.onDidSaveTextDocument(async (document) => {
-    const uri = document.uri.toString();
-
+  const disposable = vscode.workspace.onDidSaveTextDocument(async (document) => {
     // 只扫描支持的文件类型
     if (!isSupportedFile(document)) {
       return;
     }
 
-    console.log(`[GitAI SAST] Auto-scanning file: ${uri}`);
+    console.log(`[GitAI SAST] Auto-scanning ${document.fileName}...`);
 
     try {
-      const response = await scanner.scanFile(
+      const response = await sastScanner.scanFile(
         vscode.workspace.rootPath || '',
         document.uri.fsPath,
         document.getText()
       );
 
-      diagnostics.updateDiagnostics(document.uri, response.findings);
+      diagnosticManager.updateDiagnostics(document.uri, response.findings);
 
       const findingCount = response.findings.length;
       if (findingCount > 0) {
@@ -145,11 +226,11 @@ function registerAutoScan(
         );
       }
     } catch (error) {
-      console.error('[GitAI SAST] Auto scan failed:', error);
+      console.error(`[GitAI SAST] Auto-scan failed for ${document.fileName}:`, error);
     }
   });
 
-  context.subscriptions.push(saveDisposable);
+  context.subscriptions.push(disposable);
 }
 
 /**
