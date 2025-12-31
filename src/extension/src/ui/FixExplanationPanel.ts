@@ -8,6 +8,7 @@ export class FixExplanationPanel {
   private static currentPanel: FixExplanationPanel | undefined;
   private readonly panel: vscode.WebviewPanel;
   private readonly disposables: vscode.Disposable[] = [];
+  private fixCode: string = '';
 
   /**
    * 显示解释面板
@@ -15,16 +16,23 @@ export class FixExplanationPanel {
    * @param finding 漏洞信息
    * @param suggestion AI 建议全文
    * @param thinking AI 推理过程（可选）
+   * @param fixCode 修复代码（可选）
    */
   static async show(
     finding: Finding,
     suggestion: string,
-    thinking?: string
+    thinking?: string,
+    fixCode?: string
   ): Promise<void> {
     // 如果已有面板，直接使用
     if (FixExplanationPanel.currentPanel) {
       FixExplanationPanel.currentPanel.panel.reveal();
-      FixExplanationPanel.currentPanel.updateContent(finding, suggestion, thinking);
+      FixExplanationPanel.currentPanel.updateContent(
+        finding,
+        suggestion,
+        thinking,
+        fixCode
+      );
       return;
     }
 
@@ -43,7 +51,8 @@ export class FixExplanationPanel {
       panel,
       finding,
       suggestion,
-      thinking
+      thinking,
+      fixCode
     );
   }
 
@@ -51,9 +60,11 @@ export class FixExplanationPanel {
     panel: vscode.WebviewPanel,
     private finding: Finding,
     private suggestion: string,
-    private thinking?: string
+    private thinking?: string,
+    fixCode?: string
   ) {
     this.panel = panel;
+    this.fixCode = fixCode || this.extractCodeFromSuggestion(suggestion);
     this.panel.webview.html = this.getHtml();
 
     // 监听面板关闭事件
@@ -73,11 +84,13 @@ export class FixExplanationPanel {
   private updateContent(
     finding: Finding,
     suggestion: string,
-    thinking?: string
+    thinking?: string,
+    fixCode?: string
   ): void {
     this.finding = finding;
     this.suggestion = suggestion;
     this.thinking = thinking;
+    this.fixCode = fixCode || this.extractCodeFromSuggestion(suggestion);
     this.panel.webview.html = this.getHtml();
   }
 
@@ -162,6 +175,7 @@ export class FixExplanationPanel {
       margin-top: 20px;
       display: flex;
       gap: 10px;
+      flex-wrap: wrap;
     }
 
     button {
@@ -214,6 +228,12 @@ export class FixExplanationPanel {
       background: #d32f2f;
       color: white;
     }
+
+    .info {
+      font-size: 12px;
+      color: var(--vscode-descriptionForeground);
+      margin-top: 10px;
+    }
   </style>
 </head>
 <body>
@@ -239,13 +259,31 @@ export class FixExplanationPanel {
     <div>${this.escapeHtml(this.suggestion)}</div>
   </div>
 
+  ${this.fixCode ? `
+  <div>
+    <h3>🔧 Fix Code</h3>
+    <pre><code>${this.escapeHtml(this.fixCode)}</code></pre>
+  </div>
+  ` : ''}
+
   <div class="actions">
-    <button class="btn-primary" onclick="copyCode()">Copy Code</button>
+    ${this.fixCode ? `
+    <button class="btn-primary" onclick="applyFix()">Apply Fix</button>
+    ` : ''}
+    <button class="btn-secondary" onclick="copyCode()">Copy Code</button>
     <button class="btn-secondary" onclick="dismiss()">Dismiss</button>
+  </div>
+
+  <div class="info">
+    Click "Apply Fix" to automatically apply the fix to the editor.
   </div>
 
   <script>
     const vscode = acquireVsCodeApi();
+
+    function applyFix() {
+      vscode.postMessage({ command: 'applyFix' });
+    }
 
     function copyCode() {
       vscode.postMessage({ command: 'copyCode' });
@@ -276,6 +314,9 @@ export class FixExplanationPanel {
    */
   private handleMessage(message: { command: string }): void {
     switch (message.command) {
+      case 'applyFix':
+        this.handleApplyFix();
+        break;
       case 'copyCode':
         this.handleCopyCode();
         break;
@@ -286,18 +327,51 @@ export class FixExplanationPanel {
   }
 
   /**
+   * 处理应用修复
+   */
+  private async handleApplyFix(): Promise<void> {
+    if (!this.fixCode) {
+      vscode.window.showWarningMessage('No fix code available');
+      return;
+    }
+
+    // 获取当前活动的编辑器
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+      vscode.window.showWarningMessage('No active editor');
+      return;
+    }
+
+    // 导入 FixDiffViewer（避免循环依赖）
+    const { FixDiffViewer } = await import('./FixDiffViewer');
+
+    // 尝试应用修复
+    const success = await FixDiffViewer.applyFix(
+      editor,
+      this.finding,
+      this.fixCode
+    );
+
+    if (success) {
+      vscode.window.showInformationMessage('Fix applied successfully');
+    } else {
+      vscode.window.showWarningMessage(
+        'Failed to apply fix automatically. Please copy the code and apply it manually.'
+      );
+    }
+  }
+
+  /**
    * 处理复制代码
    */
   private async handleCopyCode(): Promise<void> {
-    // 从 suggestion 中提取代码
-    const code = this.extractCodeFromSuggestion(this.suggestion);
-
-    if (code) {
-      await vscode.env.clipboard.writeText(code);
-      vscode.window.showInformationMessage('Code copied to clipboard');
-    } else {
-      vscode.window.showWarningMessage('No code found in suggestion');
+    if (!this.fixCode) {
+      vscode.window.showWarningMessage('No code available to copy');
+      return;
     }
+
+    await vscode.env.clipboard.writeText(this.fixCode);
+    vscode.window.showInformationMessage('Code copied to clipboard');
   }
 
   /**
