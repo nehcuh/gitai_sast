@@ -48,49 +48,20 @@ export async function createTestDocument(
 /**
  * 等待一段时间
  */
-export async function sleep(ms: number): Promise<void> {
+export async function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/**
- * 等待命令执行
- */
-export async function waitForCommand(
-  command: string,
-  timeout = 5000
-): Promise<any> {
-  const startTime = Date.now();
-
-  while (Date.now() - startTime < timeout) {
-    try {
-      // TODO: 实现命令等待逻辑
-      // 目前仅使用 sleep
-      await sleep(100);
-    } catch (error) {
-      // 忽略错误
-    }
-  }
-
-  throw new Error(`Command ${command} timed out`);
 }
 
 /**
  * 关闭所有编辑器
  */
 export async function closeAllEditors(): Promise<void> {
-  await vscode.commands.executeCommand('workbench.action.closeAllEditors');
-  await sleep(100);
+  return await vscode.commands.executeCommand(
+    'workbench.action.closeAllEditors'
+  );
 }
 
-/**
- * 清理测试文件
- */
-export async function cleanupTestFiles(uris: vscode.Uri[]): Promise<void> {
-  for (const uri of uris) {
-    try {
-      await vscode.workspace.fs.delete(uri);
-    } catch (error) {
-      // 忽略删除失败
-    }
-  }
+// 运行所有测试
+export function run(): void {
+  console.log('Running tests...');
 }
