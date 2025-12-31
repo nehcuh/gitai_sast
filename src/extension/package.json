@@ -124,6 +124,16 @@
           "minimum": 1000,
           "description": "Request timeout in milliseconds for OpenAI-compatible endpoint"
         },
+        "gitai.sast.ai.stream": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable streaming AI fixes (OpenAI-compatible: request stream; UI: show a live Markdown preview)."
+        },
+        "gitai.sast.ai.enableThinking": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable longer reasoning/explanations in AI outputs (may be slower)."
+        },
         "gitai.sast.ai.systemPrompt": {
           "type": "string",
           "default": "",
@@ -137,7 +147,7 @@
         "gitai.sast.ai.debugLogging": {
           "type": "boolean",
           "default": false,
-          "description": "Log AI request/response details to the 'GitAI SAST' Output channel (may include code snippets)."
+          "description": "Log AI request/response details to 'GitAI SAST' Output channel (may include code snippets)."
         },
         "gitai.sast.ai.debugMaxChars": {
           "type": "number",
@@ -151,16 +161,20 @@
   "scripts": {
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "pretest": "npm run compile && npm run lint",
+    "pretest": "npm run compile && npm run lint && npm run copy-tests",
     "lint": "eslint src --ext ts",
-    "test": "node ./out/test/runTest.js"
+    "test": "node ./dist/test/runTest.js",
+    "copy-tests": "node ./scripts/copy-tests.js"
   },
   "devDependencies": {
+    "@types/mocha": "^10.0.10",
     "@types/node": "^18.0.0",
     "@types/vscode": "^1.80.0",
     "@typescript-eslint/eslint-plugin": "^6.0.0",
     "@typescript-eslint/parser": "^6.0.0",
+    "@vscode/test-electron": "^2.5.2",
     "eslint": "^8.45.0",
+    "ncp": "^2.0.0",
     "typescript": "^5.1.6"
   },
   "dependencies": {
