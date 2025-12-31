@@ -40,6 +40,11 @@ export interface ScanConfig {
   include_snippets: boolean;
   max_concurrent_scans: number;
   timeout_seconds: number;
+  enable_remote_scan: boolean;
+  remote_url: string;
+  remote_user_id: string;
+  remote_allow_invalid_certs?: boolean;
+  remote_ca_cert_path?: string;
 }
 
 export interface IgnoreItem {

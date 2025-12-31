@@ -4,6 +4,9 @@ import { SastScanner } from './core/SastScanner';
 import { DiagnosticManager } from './core/DiagnosticManager';
 import { AiFixProvider } from './ai/AiFixProvider';
 import { registerScanCommands } from './commands/scan';
+import { registerAiFixCommand } from './commands/aiFix';
+import { SemgrepBridge } from './integrations/SemgrepBridge';
+import { initOutputLogger } from './core/OutputLogger';
 
 /**
  * Extension 激活
@@ -11,41 +14,83 @@ import { registerScanCommands } from './commands/scan';
 export async function activate(context: vscode.ExtensionContext) {
   console.log('[GitAI SAST] Extension is activating...');
 
+  initOutputLogger(context);
+
   // 获取配置
   const config = vscode.workspace.getConfiguration('gitai.sast');
   const mcpServerPath = config.get<string>('mcpServerPath') || '';
 
   // 初始化 MCP Client
   const mcpClient = new McpClient(mcpServerPath);
-  
-  try {
-    await mcpClient.connect();
-    console.log('[GitAI SAST] MCP Server connected');
-  } catch (error) {
-    console.error('[GitAI SAST] Failed to connect to MCP Server:', error);
-    vscode.window.showErrorMessage('Failed to connect to MCP Server');
-    return;
-  }
 
   // 初始化核心组件
   const sastScanner = new SastScanner(mcpClient);
   const diagnosticManager = new DiagnosticManager(context);
   const aiFixProvider = new AiFixProvider();
-
-  // 检查 AI 可用性
-  const aiAvailable = await aiFixProvider.checkAvailability();
-  if (!aiAvailable) {
-    console.log('[GitAI SAST] AI model not available');
-    vscode.window.showWarningMessage('AI model not available. AI fix features will be disabled.');
-  } else {
-    console.log('[GitAI SAST] AI model available');
-  }
+  const semgrepBridge = new SemgrepBridge(context);
 
   // 注册命令
   registerScanCommands(context, sastScanner, diagnosticManager, aiFixProvider);
+  registerAiFixCommand(context, aiFixProvider);
 
   // 注册自动扫描
   registerAutoScan(context, sastScanner, diagnosticManager);
+
+  // 尝试复用 Semgrep 插件（作为 Opengrep LSP Client）
+  void semgrepBridge.maybeEnableOpengrepBackend();
+  context.subscriptions.push(semgrepBridge);
+
+  // MCP Server: 配置变更时更新路径并尝试重连
+  const configDisposable = vscode.workspace.onDidChangeConfiguration((e) => {
+    if (!e.affectsConfiguration('gitai.sast.mcpServerPath')) {
+      return;
+    }
+
+    const newPath = vscode.workspace
+      .getConfiguration('gitai.sast')
+      .get<string>('mcpServerPath') || '';
+
+    mcpClient.updateServerPath(newPath);
+
+    if (newPath.trim()) {
+      void mcpClient.connect().then(
+        () => console.log('[GitAI SAST] MCP Server connected'),
+        (error) => console.error('[GitAI SAST] Failed to connect to MCP Server:', error)
+      );
+    }
+  });
+  context.subscriptions.push(configDisposable);
+
+  // MCP Server: 若已配置则后台连接（不阻塞激活/命令注册）
+  if (mcpServerPath.trim()) {
+    void mcpClient.connect().then(
+      () => console.log('[GitAI SAST] MCP Server connected'),
+      (error) => console.error('[GitAI SAST] Failed to connect to MCP Server:', error)
+    );
+  } else {
+    console.log('[GitAI SAST] MCP Server path not configured; scan commands will prompt when used.');
+  }
+
+  // 清理资源
+  context.subscriptions.push({
+    dispose: () => {
+      void mcpClient.disconnect();
+    },
+  });
+
+  // 检查 AI 可用性（不阻塞激活）
+  void aiFixProvider.checkAvailability().then(
+    (aiAvailable) => {
+      if (!aiAvailable) {
+        console.log('[GitAI SAST] AI model not available; AI fix features disabled');
+      } else {
+        console.log('[GitAI SAST] AI model available');
+      }
+    },
+    (error) => {
+      console.error('[GitAI SAST] Failed to check AI availability:', error);
+    }
+  );
 
   console.log('[GitAI SAST] Extension activated');
 }

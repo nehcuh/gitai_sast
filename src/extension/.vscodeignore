@@ -1,0 +1,2 @@
+# Exclude local/internal certificates from extension packages
+*.pem

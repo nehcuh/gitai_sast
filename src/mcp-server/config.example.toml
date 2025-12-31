@@ -1,0 +1,43 @@
+# MCP Server Scanner Configuration
+# 复制此文件为 config.toml 并根据需要修改
+
+[scan]
+# 严重性级别: ERROR, WARNING, INFO
+severity_threshold = "ERROR"
+
+# 是否启用 Opengrep
+enable_opengrep = true
+
+# 是否包含代码片段
+include_snippets = true
+
+# 最大并发扫描数
+max_concurrent_scans = 1
+
+# 扫描超时时间（秒）
+timeout_seconds = 300
+
+# 是否启用远程扫描
+enable_remote_scan = false
+
+# 远程扫描 URL
+remote_url = "https://example.com/oscap"
+
+# 远程扫描用户 ID
+remote_user_id = ""
+
+[opengrep]
+# Opengrep 可执行文件路径（可选）
+# path = "/path/to/opengrep"
+
+# 是否自动下载 Opengrep
+auto_download = true
+
+# Opengrep 版本
+version = "v1.13.2"
+
+[remote]
+# 远程 SAST 配置
+# url = "https://example.com/oscap"
+# user_id = "user123"
+# signature_key = "optional-signature-key"

@@ -1,3 +1,4 @@
+import { ChildProcessWithoutNullStreams, spawn } from 'child_process';
 import { McpRequest, McpResponse } from './types';
 
 /**
@@ -5,27 +6,54 @@ import { McpRequest, McpResponse } from './types';
  */
 export class McpClient {
   private requestId = 0;
-  private process: any | null = null;
+  private process: ChildProcessWithoutNullStreams | null = null;
+  private connecting: Promise<void> | null = null;
   private pendingRequests = new Map<string, { resolve: (value: any) => void; reject: (error: any) => void }>();
 
   constructor(private serverPath: string) {}
 
   /**
+   * 更新 MCP Server 路径（会断开已有连接）
+   */
+  updateServerPath(serverPath: string) {
+    const next = serverPath.trim();
+    if (next === this.serverPath) {
+      return;
+    }
+
+    this.serverPath = next;
+    void this.disconnect();
+  }
+
+  /**
    * 连接到 MCP Server
    */
   async connect(): Promise<void> {
-    const { spawn } = require('child_process');
-    
-    this.process = spawn(this.serverPath, [], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-
-    if (!this.process) {
-      throw new Error('Failed to spawn MCP Server process');
+    if (this.process) {
+      return;
+    }
+    if (this.connecting) {
+      return this.connecting;
     }
 
+    this.connecting = this.doConnect().finally(() => {
+      this.connecting = null;
+    });
+    return this.connecting;
+  }
+
+  private async doConnect(): Promise<void> {
+    if (!this.serverPath) {
+      throw new Error('MCP Server path is not configured. Set "gitai.sast.mcpServerPath" in Settings.');
+    }
+
+    const child = spawn(this.serverPath, [], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    this.process = child;
+
     // 监听 stdout (响应)
-    this.process.stdout?.on('data', (data: Buffer) => {
+    child.stdout?.on('data', (data: Buffer) => {
       const lines = data.toString().split('\n').filter(l => l.trim());
       
       for (const line of lines) {
@@ -39,23 +67,79 @@ export class McpClient {
     });
 
     // 监听 stderr (日志)
-    this.process.stderr?.on('data', (data: Buffer) => {
+    child.stderr?.on('data', (data: Buffer) => {
       console.error('[MCP Server]', data.toString());
     });
 
     // 监听退出
-    this.process.on('close', (code: number) => {
+    child.on('close', (code: number) => {
       console.log(`[MCP Server] Exited with code ${code}`);
+      this.process = null;
+      this.rejectAllPendingRequests(new Error('MCP Server disconnected'));
     });
 
-    // 等待服务器启动
-    await new Promise<void>((resolve) => setTimeout(resolve, 500));
+    // 处理启动阶段错误/过早退出
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+
+      const cleanup = () => {
+        child.off('error', onError);
+        child.off('exit', onExit);
+      };
+
+      const onError = (error: Error) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        this.process = null;
+        reject(error);
+      };
+
+      const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        this.process = null;
+        reject(new Error(`MCP Server exited during startup (code: ${code ?? 'null'}, signal: ${signal ?? 'null'})`));
+      };
+
+      child.once('error', onError);
+      child.once('exit', onExit);
+
+      // 等待服务器启动
+      setTimeout(() => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        resolve();
+      }, 500);
+    });
+  }
+
+  /**
+   * 确保已连接（未连接时尝试连接）
+   */
+  async ensureConnected(): Promise<void> {
+    if (this.process) {
+      return;
+    }
+    await this.connect();
   }
 
   /**
    * 发送请求
    */
   async sendRequest(method: string, params?: any): Promise<any> {
+    if (!this.process || this.process.killed) {
+      throw new Error('MCP Server is not connected. Configure "gitai.sast.mcpServerPath" and try again.');
+    }
+
     const id = (++this.requestId).toString();
     
     const request: McpRequest = {
@@ -67,13 +151,18 @@ export class McpClient {
 
     return new Promise((resolve, reject) => {
       this.pendingRequests.set(id, { resolve, reject });
-      
-      this.process?.stdin.write(JSON.stringify(request) + '\n', (error: any) => {
-        if (error) {
-          this.pendingRequests.delete(id);
-          reject(error);
-        }
-      });
+
+      try {
+        this.process?.stdin.write(JSON.stringify(request) + '\n', (error: any) => {
+          if (error) {
+            this.pendingRequests.delete(id);
+            reject(error);
+          }
+        });
+      } catch (error) {
+        this.pendingRequests.delete(id);
+        reject(error);
+      }
     });
   }
 
@@ -101,10 +190,71 @@ export class McpClient {
    * 调用工具
    */
   async callTool(name: string, args: any): Promise<any> {
-    return this.sendRequest('tools/call', {
+    const result = await this.sendRequest('tools/call', {
       name,
       arguments: args,
     });
+
+    return this.unwrapToolCallResult(name, result);
+  }
+
+  private unwrapToolCallResult(toolName: string, result: any): any {
+    if (!result || typeof result !== 'object') {
+      return result;
+    }
+
+    const maybeContent = (result as any).content;
+    if (!Array.isArray(maybeContent)) {
+      return result;
+    }
+
+    const isError = (result as any).is_error === true;
+    if (isError) {
+      throw new Error(this.formatToolError(toolName, maybeContent));
+    }
+
+    if (maybeContent.length === 0) {
+      return undefined;
+    }
+
+    const first = maybeContent[0];
+    if (first && typeof first === 'object' && (first as any).type === 'text' && typeof (first as any).text === 'string') {
+      return (first as any).text;
+    }
+
+    return first;
+  }
+
+  private formatToolError(toolName: string, content: any[]): string {
+    const messageParts: string[] = [];
+
+    for (const item of content) {
+      if (typeof item === 'string') {
+        messageParts.push(item);
+        continue;
+      }
+
+      if (item && typeof item === 'object') {
+        const asAny = item as any;
+        if (typeof asAny.error === 'string' && asAny.error.trim()) {
+          messageParts.push(asAny.error.trim());
+          continue;
+        }
+        if (asAny.type === 'text' && typeof asAny.text === 'string' && asAny.text.trim()) {
+          messageParts.push(asAny.text.trim());
+          continue;
+        }
+      }
+
+      try {
+        messageParts.push(JSON.stringify(item));
+      } catch {
+        messageParts.push(String(item));
+      }
+    }
+
+    const message = messageParts.filter(Boolean).join('\n').trim();
+    return message ? `Tool "${toolName}" failed: ${message}` : `Tool "${toolName}" failed`;
   }
 
   /**
@@ -121,5 +271,13 @@ export class McpClient {
   async disconnect(): Promise<void> {
     this.process?.kill();
     this.process = null;
+    this.rejectAllPendingRequests(new Error('MCP Server disconnected'));
+  }
+
+  private rejectAllPendingRequests(error: Error) {
+    for (const pending of this.pendingRequests.values()) {
+      pending.reject(error);
+    }
+    this.pendingRequests.clear();
   }
 }

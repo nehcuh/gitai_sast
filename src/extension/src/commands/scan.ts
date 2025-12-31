@@ -60,7 +60,8 @@ export function registerScanCommands(
               vscode.window.showInformationMessage('No security issues found');
             }
           } catch (error) {
-            vscode.window.showErrorMessage(`Scan failed: ${error}`);
+            const message = error instanceof Error ? error.message : String(error);
+            vscode.window.showErrorMessage(`Scan failed: ${message}`);
           }
         }
       );
@@ -125,7 +126,8 @@ export function registerScanCommands(
               vscode.window.showInformationMessage('No security issues found');
             }
           } catch (error) {
-            vscode.window.showErrorMessage(`Workspace scan failed: ${error}`);
+            const message = error instanceof Error ? error.message : String(error);
+            vscode.window.showErrorMessage(`Workspace scan failed: ${message}`);
           }
         }
       );

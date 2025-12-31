@@ -2,7 +2,7 @@
   "name": "gitai-sast",
   "displayName": "GitAI SAST",
   "description": "AI-powered static code analysis for VSCode",
-  "version": "0.1.0",
+  "version": "0.1.9",
   "publisher": "gitai",
   "engines": {
     "vscode": "^1.80.0"
@@ -12,6 +12,10 @@
   ],
   "activationEvents": [
     "onStartupFinished",
+    "onCommand:gitai.sast.scan",
+    "onCommand:gitai.sast.scanWorkspace",
+    "onCommand:gitai.sast.showResults",
+    "onCommand:gitai.sast.aiFix",
     "onLanguage:typescript",
     "onLanguage:javascript",
     "onLanguage:python",
@@ -34,6 +38,11 @@
       {
         "command": "gitai.sast.showResults",
         "title": "Show Scan Results",
+        "category": "GitAI SAST"
+      },
+      {
+        "command": "gitai.sast.aiFix",
+        "title": "AI Fix Vulnerability",
         "category": "GitAI SAST"
       }
     ],
@@ -69,7 +78,77 @@
         "gitai.sast.remoteToken": {
           "type": "string",
           "default": "",
-          "description": "Remote SAST API token"
+          "description": "Remote SAST user id (legacy setting name; prefer gitai.sast.remoteUserId)"
+        },
+        "gitai.sast.remoteUserId": {
+          "type": "string",
+          "default": "",
+          "description": "Remote SAST user id"
+        },
+        "gitai.sast.remoteAllowInsecureTls": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow invalid TLS certificates for remote SAST endpoints (insecure; use only in trusted networks)."
+        },
+        "gitai.sast.remoteCaCertPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional PEM file path for custom CA certificate used to validate remote SAST HTTPS."
+        },
+        "gitai.sast.ai.provider": {
+          "type": "string",
+          "enum": ["disabled", "vscode", "openaiCompatible"],
+          "default": "vscode",
+          "description": "AI provider for fix suggestions (disabled, VS Code built-in models, or OpenAI-compatible API)"
+        },
+        "gitai.sast.ai.apiUrl": {
+          "type": "string",
+          "default": "",
+          "description": "OpenAI-compatible chat completions endpoint URL (used when gitai.sast.ai.provider=openaiCompatible)"
+        },
+        "gitai.sast.ai.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "API key for OpenAI-compatible endpoint (used when gitai.sast.ai.provider=openaiCompatible)"
+        },
+        "gitai.sast.ai.modelName": {
+          "type": "string",
+          "default": "",
+          "description": "Model name for OpenAI-compatible endpoint (used when gitai.sast.ai.provider=openaiCompatible)"
+        },
+        "gitai.sast.ai.temperature": {
+          "type": "number",
+          "default": 0.2,
+          "minimum": 0,
+          "maximum": 2,
+          "description": "Sampling temperature for OpenAI-compatible endpoint (used when gitai.sast.ai.provider=openaiCompatible)"
+        },
+        "gitai.sast.ai.requestTimeoutMs": {
+          "type": "number",
+          "default": 60000,
+          "minimum": 1000,
+          "description": "Request timeout in milliseconds for OpenAI-compatible endpoint"
+        },
+        "gitai.sast.ai.systemPrompt": {
+          "type": "string",
+          "default": "",
+          "description": "Override system prompt (empty uses built-in prompt)"
+        },
+        "gitai.sast.ai.userPromptTemplate": {
+          "type": "string",
+          "default": "",
+          "description": "Override user prompt template (supports {rule_id}, {severity}, {title}, {description}, {code_snippet}, {context})"
+        },
+        "gitai.sast.ai.debugLogging": {
+          "type": "boolean",
+          "default": false,
+          "description": "Log AI request/response details to the 'GitAI SAST' Output channel (may include code snippets)."
+        },
+        "gitai.sast.ai.debugMaxChars": {
+          "type": "number",
+          "default": 12000,
+          "minimum": 1000,
+          "description": "Max characters per logged AI prompt/response segment."
         }
       }
     }

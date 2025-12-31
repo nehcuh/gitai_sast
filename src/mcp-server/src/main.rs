@@ -120,9 +120,7 @@ async fn handle_request(request: &McpRequest, registry: &ToolRegistry) -> McpRes
                         McpResponse {
                             jsonrpc: "2.0".to_string(),
                             id: request.id.clone(),
-                            result: Some(serde_json::json!({
-                                "content": result.content
-                            })),
+                            result: Some(serde_json::to_value(result).unwrap()),
                             error: None,
                         }
                     }
@@ -168,5 +166,95 @@ async fn handle_request(request: &McpRequest, registry: &ToolRegistry) -> McpRes
                 }),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use serde_json::json;
+
+    struct OkTool;
+
+    #[async_trait]
+    impl crate::tools::Tool for OkTool {
+        fn name(&self) -> &str {
+            "ok_tool"
+        }
+
+        fn description(&self) -> &str {
+            "ok"
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            json!({})
+        }
+
+        async fn call(&self, _request: ToolCallRequest) -> Result<crate::core::types::ToolCallResponse, String> {
+            Ok(crate::core::types::ToolCallResponse {
+                content: vec![json!({"ok": true})],
+                is_error: Some(false),
+            })
+        }
+    }
+
+    struct ErrorTool;
+
+    #[async_trait]
+    impl crate::tools::Tool for ErrorTool {
+        fn name(&self) -> &str {
+            "error_tool"
+        }
+
+        fn description(&self) -> &str {
+            "error"
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            json!({})
+        }
+
+        async fn call(&self, _request: ToolCallRequest) -> Result<crate::core::types::ToolCallResponse, String> {
+            Ok(crate::core::types::ToolCallResponse {
+                content: vec![json!({"error": "boom"})],
+                is_error: Some(true),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn tools_call_propagates_is_error() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(OkTool));
+        registry.register(Box::new(ErrorTool));
+
+        let ok_request = McpRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!("1")),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "ok_tool",
+                "arguments": {}
+            })),
+        };
+
+        let ok_response = handle_request(&ok_request, &registry).await;
+        let ok_result = ok_response.result.expect("missing result");
+        assert_eq!(ok_result.get("is_error").and_then(|v| v.as_bool()), Some(false));
+
+        let error_request = McpRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!("2")),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "error_tool",
+                "arguments": {}
+            })),
+        };
+
+        let error_response = handle_request(&error_request, &registry).await;
+        let error_result = error_response.result.expect("missing result");
+        assert_eq!(error_result.get("is_error").and_then(|v| v.as_bool()), Some(true));
     }
 }

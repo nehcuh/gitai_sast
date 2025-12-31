@@ -1,15 +1,13 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use chrono::{DateTime, Utc};
 
 // ============================================================
-// MCP 协议相关类型
+// MCP 协议类型
 // ============================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpRequest {
     pub jsonrpc: String,
-    pub id: String,
+    pub id: Option<serde_json::Value>,
     pub method: String,
     pub params: Option<serde_json::Value>,
 }
@@ -17,10 +15,8 @@ pub struct McpRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpResponse {
     pub jsonrpc: String,
-    pub id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<serde_json::Value>,
     pub result: Option<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<McpError>,
 }
 
@@ -28,196 +24,11 @@ pub struct McpResponse {
 pub struct McpError {
     pub code: i32,
     pub message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
 }
 
 // ============================================================
-// 工具相关类型
-// ============================================================
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolDefinition {
-    pub name: String,
-    pub description: String,
-    pub input_schema: serde_json::Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolCallRequest {
-    pub name: String,
-    pub arguments: serde_json::Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolCallResponse {
-    pub content: Vec<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub is_error: Option<bool>,
-}
-
-// ============================================================
-// 扫描相关类型
-// ============================================================
-
-/// 扫描请求
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScanRequest {
-    pub version: i32,
-    pub root: String,
-    pub files: HashMap<String, String>,
-    pub ignores: Vec<IgnoreItem>,
-    pub config: ScanConfig,
-}
-
-/// 扫描配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScanConfig {
-    pub severity_threshold: String,
-    pub enable_opengrep: bool,
-    pub include_snippets: bool,
-    pub max_concurrent_scans: usize,
-    pub timeout_seconds: u64,
-}
-
-/// 忽略项
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IgnoreItem {
-    pub file: String,
-    pub line: Option<u32>,
-    pub rule_id: Option<String>,
-}
-
-/// 扫描响应
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScanResponse {
-    pub version: i32,
-    pub status: ScanStatus,
-    pub scan_envelope: ScanEnvelope,
-    pub findings: Vec<Finding>,
-}
-
-/// 扫描状态
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ScanStatus {
-    #[serde(rename = "success")]
-    Success,
-    #[serde(rename = "error")]
-    Error,
-    #[serde(rename = "cancelled")]
-    Cancelled,
-}
-
-/// 扫描信封
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScanEnvelope {
-    pub scan_id: String,
-    pub timestamp: DateTime<Utc>,
-    pub files_scanned: usize,
-    pub total_lines: usize,
-    pub duration_ms: u64,
-}
-
-/// 发现的问题
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Finding {
-    pub id: String,
-    pub rule_id: String,
-    #[serde(rename = "type")]
-    pub finding_type: String,
-    pub severity: String,
-    pub title: String,
-    pub description: String,
-    pub location: Location,
-    pub code_snippet: String,
-    pub fix: Option<Fix>,
-    pub provider: String,
-}
-
-/// 位置信息
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Location {
-    pub file: String,
-    pub line: u32,
-    pub column: Option<u32>,
-}
-
-/// 修复建议
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Fix {
-    pub suggestion: String,
-    pub code: String,
-}
-
-// ============================================================
-// 上下文相关类型
-// ============================================================
-
-/// 获取上下文请求
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GetContextRequest {
-    pub version: i32,
-    pub root: String,
-    pub file: String,
-    pub line: u32,
-}
-
-/// 获取上下文响应
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GetContextResponse {
-    pub version: i32,
-    pub context: CodeContext,
-}
-
-/// 代码上下文
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CodeContext {
-    pub file_path: String,
-    pub code_snippet: String,
-    pub function_name: Option<String>,
-    pub imports: Vec<String>,
-    pub dependencies: Vec<String>,
-}
-
-// ============================================================
-// 污点路径相关类型
-// ============================================================
-
-/// 获取污点路径请求
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GetTaintPathRequest {
-    pub version: i32,
-    pub root: String,
-    pub finding: Finding,
-}
-
-/// 获取污点路径响应
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GetTaintPathResponse {
-    pub version: i32,
-    pub taint_path: TaintPath,
-}
-
-/// 污点路径
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaintPath {
-    pub steps: Vec<TaintStep>,
-    pub provider: String,
-}
-
-/// 污点步骤
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaintStep {
-    pub order: u32,
-    pub role: String, // "source" | "sink" | "flow"
-    pub file: String,
-    pub line: u32,
-    pub symbol: String,
-    pub comment: Option<String>,
-}
-
-// ============================================================
-// 服务器信息
+// Server 信息
 // ============================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -238,39 +49,310 @@ pub struct ToolsCapability {
 }
 
 // ============================================================
-// 错误类型
+// Tool 类型
 // ============================================================
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallRequest {
+    pub name: String,
+    pub arguments: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallResponse {
+    pub content: Vec<serde_json::Value>,
+    pub is_error: Option<bool>,
+}
+
+// ============================================================
+// 扫描相关类型
+// ============================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanRequest {
+    pub version: i32,
+    pub root: String,
+    pub files: std::collections::HashMap<String, String>,
+    pub ignores: Vec<IgnoreItem>,
+    pub config: ScanConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanConfig {
+    pub severity_threshold: String,
+    pub enable_opengrep: bool,
+    pub include_snippets: bool,
+    pub max_concurrent_scans: i32,
+    pub timeout_seconds: i32,
+    pub enable_remote_scan: bool,
+    pub remote_url: String,
+    pub remote_user_id: String,
+    #[serde(default)]
+    pub remote_allow_invalid_certs: bool,
+    #[serde(default)]
+    pub remote_ca_cert_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IgnoreItem {
+    pub file: String,
+    pub line: Option<u32>,
+    pub rule_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanResponse {
+    pub version: i32,
+    pub status: ScanStatus,
+    pub scan_envelope: ScanEnvelope,
+    pub findings: Vec<Finding>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ScanStatus {
+    #[serde(rename = "success")]
+    Success,
+    #[serde(rename = "error")]
+    Error,
+    #[serde(rename = "cancelled")]
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanEnvelope {
+    pub scan_id: String,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub files_scanned: usize,
+    pub total_lines: usize,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Finding {
+    pub id: String,
+    pub rule_id: String,
+    pub r#type: String,
+    pub severity: String,
+    pub title: String,
+    pub description: String,
+    pub location: Location,
+    pub code_snippet: String,
+    pub fix: Option<Fix>,
+    pub provider: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Location {
+    pub file: String,
+    pub line: u32,
+    pub column: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Fix {
+    pub suggestion: String,
+    pub code: String,
+}
+
+// ============================================================
+// 上下文相关类型
+// ============================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetContextRequest {
+    pub version: i32,
+    pub root: String,
+    pub file: String,
+    pub line: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetContextResponse {
+    pub version: i32,
+    pub context: CodeContext,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodeContext {
+    pub file_path: String,
+    pub code_snippet: String,
+    pub function_name: Option<String>,
+    pub imports: Vec<String>,
+    pub dependencies: Vec<String>,
+}
+
+// ============================================================
+// 污点路径相关类型
+// ============================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetTaintPathRequest {
+    pub version: i32,
+    pub root: String,
+    pub finding: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetTaintPathResponse {
+    pub version: i32,
+    pub taint_path: TaintPath,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaintPath {
+    pub steps: Vec<TaintStep>,
+    pub provider: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaintStep {
+    pub file: String,
+    pub line: u32,
+    pub function: String,
+    pub description: String,
+}
+
+// ============================================================
+// 远程 SAST 相关类型
+// ============================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteSastConfig {
+    pub url: String,
+    pub user_id: String,
+    pub signature_key: Option<String>,
+    #[serde(default)]
+    pub allow_invalid_certs: bool,
+    #[serde(default)]
+    pub ca_cert_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteUploadRequest {
+    pub project_name: String,
+    pub project_version_name: Option<String>,
+    pub version: Option<String>,
+    pub language: Option<String>,
+    pub description: Option<String>,
+    pub white_list: Option<String>,
+    pub issue_view_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteUploadResponse {
+    pub file_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteScanRequest {
+    pub source_path: String,
+    #[serde(flatten)]
+    pub upload_request: RemoteUploadRequest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteScanResponse {
+    pub project_id: String,
+    pub project_version_id: String,
+    pub status: i32,
+    pub info: String,
+    pub details_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteScanResultRequest {
+    pub project_version_id: String,
+    pub process_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteScanResultResponse {
+    pub status: i32,
+    pub info: String,
+    pub scan_progress: Option<i32>,
+    pub risk_high_count: i32,
+    pub risk_medium_count: i32,
+    pub risk_low_count: i32,
+    pub risk_total_count: i32,
+    pub score: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteResultListRequest {
+    pub project_version_id: String,
+    pub page_no: Option<i32>,
+    pub page_size: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteResultListResponse {
+    pub total: i32,
+    pub records: Vec<RemoteResultRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteResultRecord {
+    pub result_id: String,
+    pub lang: String,
+    pub issue_path: String,
+    pub issue_zh_name: String,
+    pub issue_en_name: String,
+    pub category: String,
+    pub process_type: i32,
+    pub now_risk_level: i32,
+    pub issue_content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteFileCodeRequest {
+    pub project_version_id: String,
+    pub file_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteFileCodeResponse {
+    pub code: String,
+}
+
+// ============================================================
+// Server Error
+// ============================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ServerError {
-    #[error("Invalid request: {0}")]
-    InvalidRequest(String),
-
-    #[error("Tool not found: {0}")]
-    ToolNotFound(String),
-
-    #[error("Scan failed: {0}")]
-    ScanFailed(String),
-
-    #[error("Timeout: {0}")]
-    Timeout(String),
-
-    #[error("Internal error: {0}")]
-    Internal(#[from] anyhow::Error),
+    #[serde(rename = "method_not_found")]
+    MethodNotFound,
+    #[serde(rename = "invalid_params")]
+    InvalidParams,
+    #[serde(rename = "internal_error")]
+    InternalError,
 }
 
 impl ServerError {
     pub fn to_mcp_error(&self) -> McpError {
-        McpError {
-            code: match self {
-                ServerError::InvalidRequest(_) => -32600,
-                ServerError::ToolNotFound(_) => -32601,
-                ServerError::ScanFailed(_) => -32000,
-                ServerError::Timeout(_) => -32002,
-                ServerError::Internal(_) => -32603,
+        match self {
+            ServerError::MethodNotFound => McpError {
+                code: -32601,
+                message: "Method not found".to_string(),
+                data: None,
             },
-            message: self.to_string(),
-            data: None,
+            ServerError::InvalidParams => McpError {
+                code: -32602,
+                message: "Invalid params".to_string(),
+                data: None,
+            },
+            ServerError::InternalError => McpError {
+                code: -32603,
+                message: "Internal error".to_string(),
+                data: None,
+            },
         }
     }
 }
