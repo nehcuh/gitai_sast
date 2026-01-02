@@ -752,6 +752,86 @@ async function testFixDiffViewerApplyFixReplacesMultiLineSnippet(): Promise<void
   assert.ok(updated.includes('safe2()'), 'Expected safe2 to be inserted');
 }
 
+async function testFixDiffViewerFallbackCausesDataLossWithPartialLineMismatch(): Promise<void> {
+  const document = await createTestDocument(
+    '  const x = unsafe(); const y = 1;', // Note the leading spaces
+    'typescript'
+  );
+
+  const editor = vscode.window.activeTextEditor;
+  assert.ok(editor, 'Expected an active editor');
+
+  const finding = createTestFinding({
+    title: 'Whitespace mismatch data loss test',
+    location: {
+      file: document.uri.fsPath,
+      line: 1,
+      column: 0,
+    },
+    // Snippet has NO leading spaces, but document does.
+    // Also document has `const y = 1;` on the same line.
+    code_snippet: 'const x = unsafe();',
+  });
+
+  // If exact match fails (due to leading spaces mismatch), it falls back to line replacement.
+  // The fix is "const x = safe();".
+  // If line replacement happens, "const y = 1;" will be LOST.
+  await FixDiffViewer.applyFix(editor, finding, 'const x = safe();');
+
+  const updated = editor.document.getText();
+
+  // We EXPECT this to fail currently (data loss happens)
+  // Logic: 
+  // 1. snippet 'const x = unsafe();' not found in '  const x = unsafe(); ...' (due to leading spaces if using strictly finding.code_snippet which might be trimmed or diff)
+  //    Wait, indexOf('const x = unsafe();') WILL find match inside '  const x = unsafe(); ...'.
+  //    So exact match works for substrings.
+  //    We need a case where substring match fails. 
+  //    E.g. indentation in snippet is different from document.
+
+  // Let's try: Snippet has different internal spacing.
+  // Document: 'unsafe(  arg  )'
+  // Snippet: 'unsafe(arg)'
+}
+
+async function testFixDiffViewerWhitespaceMismatchDataLoss(): Promise<void> {
+  const document = await createTestDocument(
+    'const x = unsafe(  1  ); const y = 2;',
+    'typescript'
+  );
+
+  const editor = vscode.window.activeTextEditor;
+  assert.ok(editor, 'Expected an active editor');
+
+  const finding = createTestFinding({
+    title: 'Whitespace mismatch data loss test',
+    location: {
+      file: document.uri.fsPath,
+      line: 1,
+      column: 0, // 1-based in finding usually? logic says line-1.
+    },
+    // Snippet from scanner might be normalized
+    code_snippet: 'unsafe(1)',
+  });
+
+  // Fix from AI
+  const fixCode = 'safe(1)';
+
+  await FixDiffViewer.applyFix(editor, finding, fixCode);
+
+  const updated = editor.document.getText();
+
+  // CURRENT BEHAVIOR (Expected Failure): 
+  // Snippet 'unsafe(1)' NOT found in 'const x = unsafe(  1  ); const y = 2;'
+  // Fallback -> Replace entire line 1 with 'safe(1)'
+  // Result -> 'safe(1)' (data loss of 'const x =' and 'const y = 2;')
+
+  // We want to ASSERT that we verify this behavior (so we can fix it)
+  // Or rather, this test is asserting correct behavior, so it SHOULD FAIL now if we assert "No Data Loss".
+
+  // Let's assert that data is preserved (this assertion should fail currently)
+  assert.ok(updated.includes('const y = 2;'), 'CRITICAL: Data loss detected! Sibling code on same line was removed.');
+}
+
 // 运行所有测试
 export async function run(): Promise<void> {
   console.log('Running tests...');
@@ -804,6 +884,12 @@ export async function run(): Promise<void> {
   await runTest(
     'FixDiffViewer applyFix replaces multi-line snippet',
     testFixDiffViewerApplyFixReplacesMultiLineSnippet
+  );
+
+  // This test is expected to fail currently, satisfying the reproduction requirement.
+  await runTest(
+    'FixDiffViewer whitespace mismatch data loss check',
+    testFixDiffViewerWhitespaceMismatchDataLoss
   );
 
   await closeAllEditors();

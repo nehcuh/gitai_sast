@@ -77,8 +77,20 @@ export class FixDiffViewer {
     if (snippetMatch) {
       range = snippetMatch;
     } else {
-      // fallback
+      // Fallback Logic
+      // CRITICAL CHANGE: Do NOT blindly replace the whole line if snippet was provided but not found.
+      // This prevents data loss when fuzzy match fails.
+
       const line = finding.location.line - 1;
+
+      // Safety check: If snippet is provided but not matched, check if we should abort.
+      if (finding.code_snippet && finding.code_snippet.trim().length > 0) {
+        console.warn(`[FixDiffViewer] safe abort: snippet provided '${finding.code_snippet}' but no match found in document.`);
+        // Return original content to indicate no-op/failure to apply safely
+        return document.getText();
+      }
+
+      // Only fallback to line replacement if NO snippet was provided (rare case, maybe range-based finding)
       if (line < 0 || line >= document.lineCount) {
         return document.getText();
       }
@@ -87,6 +99,13 @@ export class FixDiffViewer {
 
     const normalizedCode = this.adjustIndentation(fixCode, document, range);
     return this.replaceRange(document, range, normalizedCode);
+  }
+
+  /**
+   * Escape regex special characters
+   */
+  private static escapeRegExp(string: string): string {
+    return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
   /**
@@ -107,24 +126,28 @@ export class FixDiffViewer {
 
     const docText = document.getText();
     const snippet = finding.code_snippet;
-    const matches: number[] = [];
 
-    // 查找所有匹配项
-    let pos = docText.indexOf(snippet);
-    while (pos !== -1) {
-      matches.push(pos);
-      pos = docText.indexOf(snippet, pos + 1);
+    // 1. Try Exact Match
+    let offsets = this.findOffsetsExact(docText, snippet);
+
+    // 2. Try Fuzzy Match (ignore whitespace differences)
+    if (offsets.length === 0) {
+      offsets = this.findOffsetsFuzzy(docText, snippet);
     }
 
-    if (matches.length === 0) {
+    if (offsets.length === 0) {
       return null;
     }
 
+    // Convert offsets to Ranges
+    const ranges = offsets.map(([start, end]) => new vscode.Range(
+      document.positionAt(start),
+      document.positionAt(end)
+    ));
+
     // 如果只有一个匹配，直接返回
-    if (matches.length === 1) {
-      const start = document.positionAt(matches[0]);
-      const end = document.positionAt(matches[0] + snippet.length);
-      return new vscode.Range(start, end);
+    if (ranges.length === 1) {
+      return ranges[0];
     }
 
     // 如果有多个匹配，找到距离 finding.location 最近的那个
@@ -133,20 +156,48 @@ export class FixDiffViewer {
     const targetPos = new vscode.Position(targetLine, targetColumn);
     const targetOffset = document.offsetAt(targetPos);
 
-    let bestMatchIndex = matches[0];
-    let minDistance = Math.abs(targetOffset - matches[0]);
+    let bestRange = ranges[0];
+    // offsets[0][0] is the start offset
+    let minDistance = Math.abs(targetOffset - offsets[0][0]);
 
-    for (let i = 1; i < matches.length; i++) {
-      const distance = Math.abs(targetOffset - matches[i]);
+    for (let i = 1; i < ranges.length; i++) {
+      const distance = Math.abs(targetOffset - offsets[i][0]);
       if (distance < minDistance) {
         minDistance = distance;
-        bestMatchIndex = matches[i];
+        bestRange = ranges[i];
       }
     }
 
-    const start = document.positionAt(bestMatchIndex);
-    const end = document.positionAt(bestMatchIndex + snippet.length);
-    return new vscode.Range(start, end);
+    return bestRange;
+  }
+
+  // Helper to find matches returning offsets [start, end]
+  private static findOffsetsExact(text: string, snippet: string): [number, number][] {
+    const offsets: [number, number][] = [];
+    let pos = text.indexOf(snippet);
+    while (pos !== -1) {
+      offsets.push([pos, pos + snippet.length]);
+      pos = text.indexOf(snippet, pos + 1);
+    }
+    return offsets;
+  }
+
+  private static findOffsetsFuzzy(text: string, snippet: string): [number, number][] {
+    // Split snippet into tokens (words and symbols), ignoring whitespace
+    const tokens = snippet.split(/\s+/).filter(s => s.length > 0);
+    if (tokens.length === 0) return [];
+
+    // Construct regex: token1 \s* token2 \s* ...
+    // escape tokens
+    const pattern = tokens.map(this.escapeRegExp).join('\\s*');
+    const regex = new RegExp(pattern, 'g');
+
+    const offsets: [number, number][] = [];
+    let match;
+    while ((match = regex.exec(text)) !== null) {
+      offsets.push([match.index, match.index + match[0].length]);
+    }
+    return offsets;
   }
 
   /**
@@ -190,6 +241,7 @@ export class FixDiffViewer {
     const document = editor.document;
 
     // 尝试片段匹配
+    // 尝试片段匹配
     const snippetMatch = this.findSnippetMatch(document, finding);
     let range: vscode.Range;
 
@@ -197,7 +249,14 @@ export class FixDiffViewer {
       range = snippetMatch;
     } else {
       // fallback: 简单的按行替换
+      // CRITICAL: Apply same safety check as applyFixToContent
       const line = finding.location.line - 1; // 转换为 0-based 索引
+
+      if (finding.code_snippet && finding.code_snippet.trim().length > 0) {
+        console.warn(`[FixDiffViewer] safe abort: snippet provided but not found.`);
+        return false;
+      }
+
       if (line < 0 || line >= document.lineCount) {
         return false;
       }
