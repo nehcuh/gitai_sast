@@ -2,8 +2,8 @@ pub mod core;
 pub mod scanner;
 pub mod tools;
 
-use core::ServerInfo;
-use tools::{ToolRegistry};
+use crate::core::types::ServerInfo;
+use crate::tools::{ToolRegistry};
 
 pub const SERVER_NAME: &str = "mcp-sast-server";
 pub const SERVER_VERSION: &str = "0.1.0";

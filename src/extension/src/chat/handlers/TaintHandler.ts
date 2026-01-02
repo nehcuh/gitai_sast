@@ -1,12 +1,16 @@
 import * as vscode from 'vscode';
 import { McpClient } from '../../core/McpClient';
 import { Finding } from '../../core/types';
+import { DiagnosticManager } from '../../core/DiagnosticManager';
 
 /**
  * Taint 命令处理器
  */
 export class TaintHandler {
-  constructor(private mcpClient: McpClient) {}
+  constructor(
+    private mcpClient: McpClient,
+    private diagnostics: DiagnosticManager
+  ) {}
 
   /**
    * 处理 Taint 命令
@@ -71,9 +75,7 @@ export class TaintHandler {
    * 获取 Findings
    */
   private async getFindings(uri: vscode.Uri): Promise<Finding[]> {
-    // TODO: 从 DiagnosticManager 获取 findings
-    // 暂时返回空列表
-    return [];
+    return this.diagnostics.getFindings(uri);
   }
 
   /**

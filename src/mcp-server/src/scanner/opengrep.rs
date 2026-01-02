@@ -12,10 +12,11 @@ use uuid::Uuid;
 /// Opengrep 扫描器
 pub struct OpengrepScanner {
     opengrep_path: String,
+    opengrep_rules: Option<String>,
 }
 
 impl OpengrepScanner {
-    pub fn new(opengrep_path: Option<String>) -> Self {
+    pub fn new(opengrep_path: Option<String>, opengrep_rules: Option<String>) -> Self {
         let opengrep_path = opengrep_path.unwrap_or_else(|| {
             // 尝试从 PATH 中查找 opengrep
             if let Ok(path) = which::which("opengrep") {
@@ -31,10 +32,18 @@ impl OpengrepScanner {
                 }
             }
         });
-        
+
         info!("Using opengrep at: {}", opengrep_path);
-        
-        Self { opengrep_path }
+        if let Some(ref rules) = opengrep_rules {
+            info!("Using opengrep rules from: {}", rules);
+        } else {
+            info!("Using default opengrep rules (auto)");
+        }
+
+        Self {
+            opengrep_path,
+            opengrep_rules,
+        }
     }
     
     /// 执行扫描（带超时控制）
@@ -50,16 +59,16 @@ impl OpengrepScanner {
         let total_lines = files.values().map(|c| c.lines().count()).sum::<usize>();
         
         info!("Starting scan with {} files", files_count);
-        
+
         // 计算总超时时间（根据文件数量动态调整）
         let total_timeout = Duration::from_secs(
             60 + (files_count as u64 / 5) // 基础 1 分钟 + 每个文件 0.2 秒
         );
-        
+
         let scan_future = async {
             // 构建忽略规则（使用 HashSet 优化）
             let ignore_set = self.build_ignore_set(&ignores);
-            
+
             // 执行 opengrep 扫描（带超时）
             let findings = tokio::time::timeout(
                 total_timeout,
@@ -114,13 +123,15 @@ impl OpengrepScanner {
                 let root = root.to_string();
                 let files = files.clone();
                 let severity_threshold = config.severity_threshold.clone();
+                let opengrep_rules = self.opengrep_rules.clone();
                 
                 move || {
                     Self::run_opengrep_blocking(
                         &opengrep_path,
                         &root,
                         files,
-                        &severity_threshold
+                        &severity_threshold,
+                        opengrep_rules,
                     )
                 }
             })
@@ -142,6 +153,7 @@ impl OpengrepScanner {
         root: &str,
         files: HashMap<String, String>,
         severity_threshold: &str,
+        opengrep_rules: Option<String>,
     ) -> Result<Vec<Finding>, ScanError> {
         fn normalize_path_key(path: &str) -> String {
             path.replace('\\', "/")
@@ -204,14 +216,24 @@ impl OpengrepScanner {
         command.arg("--json");
         command.arg("--quiet");
         command.arg(&severity_arg);
-        command.arg("--config=auto");
+        command.arg("--max-target-bytes=10000000");  // 最大 10MB 文件
+        command.arg("--timeout=120");  // 120 秒超时
+
+        // 使用配置的规则路径
+        if let Some(ref rules) = opengrep_rules {
+            command.arg("--config");
+            command.arg(rules);
+        } else {
+            command.arg("--config=auto");  // 使用默认规则配置
+        }
+
         command.arg(temp_dir.path());
 
         if !root.trim().is_empty() {
             command.current_dir(root);
         }
 
-        debug!("Running opengrep with command: {:?}", command);
+        info!("Running opengrep with command: {:?}", command);
 
         // 执行命令（带超时控制）
         let output = command
@@ -226,21 +248,42 @@ impl OpengrepScanner {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
-            
-            error!("Opengrep failed: {}", stderr);
+
+            error!("Opengrep failed with exit code: {:?}", output.status.code());
+            error!("Opengrep stderr: {}", stderr);
             error!("Opengrep stdout: {}", stdout);
-            
+
+            // 记录临时目录结构（用于调试）
+            error!("Temp dir contents: {:?}", temp_dir.path());
+            if let Ok(entries) = std::fs::read_dir(temp_dir.path()) {
+                for entry in entries {
+                    if let Ok(entry) = entry {
+                        error!("  - {:?}", entry.path());
+                    }
+                }
+            }
+
             return Err(ScanError::Execution(format!(
                 "Opengrep scan failed with exit code {:?}: {}",
                 output.status.code(),
                 stderr
             )));
         }
-        
+
         // 解析输出
         let stdout = String::from_utf8_lossy(&output.stdout);
+        info!("Opengrep raw output (first 500 chars): {}",
+               stdout.chars().take(500).collect::<String>());
+
+        if stdout.trim().is_empty() {
+            info!("Opengrep returned no output - no vulnerabilities found");
+            return Ok(vec![]);
+        }
+
         let opengrep_results: OpengrepResults = serde_json::from_str(&stdout)
             .map_err(|e| {
+                error!("Failed to parse opengrep output as JSON: {}", e);
+                error!("Raw output: {}", stdout);
                 ScanError::Execution(format!("Failed to parse opengrep output: {}", e))
             })?;
         
@@ -313,10 +356,18 @@ impl OpengrepScanner {
         }
 
         let file_key = normalize_path_key(&result.path);
-        let file = path_map
-            .get(&file_key)
-            .cloned()
-            .unwrap_or_else(|| result.path.clone());
+        let file = if let Some(path) = path_map.get(&file_key) {
+            path.clone()
+        } else {
+            // 尝试通过后缀匹配 (处理 Mac 上 /var/folders vs /private/var/folders 的问题)
+            if let Some(pos) = file_key.rfind("__virtual__") {
+                let suffix = &file_key[pos..];
+                // 尝试匹配 suffix
+                 path_map.get(suffix).cloned().unwrap_or_else(|| result.path.clone())
+            } else {
+                result.path.clone()
+            }
+        };
 
         let message = result.extra.message.trim();
         let title = if message.is_empty() {
@@ -347,6 +398,7 @@ impl OpengrepScanner {
             },
             code_snippet: result.extra.lines,
             fix: None, // TODO: 实现 fix 生成
+            issue_content: None,
             provider: "local".to_string(),
         })
     }

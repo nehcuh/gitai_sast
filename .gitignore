@@ -16,8 +16,9 @@ out/
 
 # Testing
 coverage/
-*.test.ts
-*.spec.ts
+# Don't ignore test files in test/ directory
+!test/**/*.test.ts
+!test/**/*.spec.ts
 
 # Environment
 .env

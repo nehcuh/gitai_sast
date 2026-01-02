@@ -27,9 +27,9 @@ export class SastChatParticipant {
     private diagnostics: DiagnosticManager
   ) {
     // 初始化命令处理器
-    this.explainHandler = new ExplainHandler(aiFixProvider);
-    this.fixHandler = new FixHandler(aiFixProvider);
-    this.taintHandler = new TaintHandler(mcpClient);
+    this.explainHandler = new ExplainHandler(aiFixProvider, diagnostics);
+    this.fixHandler = new FixHandler(aiFixProvider, diagnostics);
+    this.taintHandler = new TaintHandler(mcpClient, diagnostics);
     this.scanHandler = new ScanHandler(scanner, diagnostics);
   }
 
@@ -46,7 +46,7 @@ export class SastChatParticipant {
     participant.iconPath = vscode.Uri.joinPath(
       context.extensionUri,
       'resources',
-      'sast-icon.png'
+      'sast-icon.svg'
     );
 
     // 设置 Follow-up 提示

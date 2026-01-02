@@ -45,6 +45,8 @@ export interface ScanConfig {
   remote_user_id: string;
   remote_allow_invalid_certs?: boolean;
   remote_ca_cert_path?: string;
+  opengrep_path?: string;
+  opengrep_rules?: string;
 }
 
 export interface IgnoreItem {

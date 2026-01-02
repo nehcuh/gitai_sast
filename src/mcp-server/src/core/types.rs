@@ -98,6 +98,10 @@ pub struct ScanConfig {
     pub remote_allow_invalid_certs: bool,
     #[serde(default)]
     pub remote_ca_cert_path: String,
+    #[serde(default)]
+    pub opengrep_path: Option<String>,
+    #[serde(default)]
+    pub opengrep_rules: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,6 +149,8 @@ pub struct Finding {
     pub location: Location,
     pub code_snippet: String,
     pub fix: Option<Fix>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_content: Option<String>,
     pub provider: String,
 }
 

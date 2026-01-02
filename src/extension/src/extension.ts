@@ -4,7 +4,7 @@ import * as vscode from 'vscode';
 import { McpClient } from './core/McpClient';
 import { SastScanner } from './core/SastScanner';
 import { DiagnosticManager } from './core/DiagnosticManager';
-import { initOutputLogger } from './core/OutputLogger';
+import * as output from './core/OutputLogger';
 
 // AI modules
 import { AiFixProvider } from './ai/AiFixProvider';
@@ -19,34 +19,88 @@ import { registerViewTaintPathCommand } from './commands/viewTaintPath';
 import { registerIgnoreCommands } from './commands/ignore';
 import { registerRefreshDiagnosticsCommand } from './commands/refreshDiagnostics';
 
+// Chat modules
+import { SastChatParticipant } from './chat';
+
 // UI modules
 import { FixDiffViewer } from './ui/FixDiffViewer';
 import { FixExplanationPanel } from './ui/FixExplanationPanel';
 
 // Integrations modules
-import { SemgrepBridge } from './integrations/SemgrepBridge';
+import { OpengrepLspClient } from './integrations/OpengrepLspClient';
+
+let mcpClient: McpClient;
+let lspClient: OpengrepLspClient;
 
 /**
  * Extension 激活
  */
 export async function activate(context: vscode.ExtensionContext) {
-  console.log('[GitAI SAST] Extension is activating...');
-
-  // 初始化输出日志
-  initOutputLogger(context);
+  // 初始化 OutputLogger
+  output.initOutputLogger(context);
+  output.info('GitAI SAST extension activating...');
 
   // 获取配置
   const config = vscode.workspace.getConfiguration('gitai.sast');
   const mcpServerPath = config.get<string>('mcpServerPath') || '';
 
+  // 初始化 MCP Client
+  // 注意：McpClient 构造函数需要 serverPath
+  mcpClient = new McpClient(mcpServerPath);
+
+  // 尝试连接 MCP Server (如果路径已配置)
+  if (mcpServerPath.trim()) {
+    mcpClient.connect().then(
+      () => output.info('[MCP] Connected to server'),
+      (err) => output.error(`[MCP] Failed to connect: ${err}`)
+    );
+  } else {
+    output.info('[MCP] Server path not configured');
+  }
+
   // 初始化核心组件
-  const mcpClient = new McpClient(mcpServerPath);
   const sastScanner = new SastScanner(mcpClient);
   const diagnosticManager = new DiagnosticManager(context);
   const aiFixProvider = new AiFixProvider();
 
-  // 初始化 Semgrep Bridge
-  const semgrepBridge = new SemgrepBridge(context);
+  const chatParticipant = new SastChatParticipant(
+    aiFixProvider,
+    mcpClient,
+    sastScanner,
+    diagnosticManager
+  );
+
+  // 初始化 Native Opengrep LSP Client
+  lspClient = new OpengrepLspClient(context);
+
+  // 监听配置变更以重启 LSP 和更新 MCP 路径
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration(e => {
+      // Opengrep LSP 配置变更
+      lspClient.handleConfigChange(e);
+
+      // MCP Server 配置变更
+      if (e.affectsConfiguration('gitai.sast.mcpServerPath')) {
+        const newPath = vscode.workspace.getConfiguration('gitai.sast').get<string>('mcpServerPath') || '';
+        mcpClient.updateServerPath(newPath);
+        if (newPath.trim()) {
+          mcpClient.connect().catch(err => output.error(`[MCP] Failed to reconnect: ${err}`));
+        }
+      }
+    })
+  );
+
+  // 延迟启动 LSP Client 和其他组件
+  setTimeout(() => {
+    lspClient.start().catch(err => output.error(`Failed to start LSP: ${err}`));
+  }, 1000);
+
+  // 注册 LSP 重启命令
+  context.subscriptions.push(
+    vscode.commands.registerCommand('gitai.sast.restartLsp', () => {
+      lspClient.restart();
+    })
+  );
 
   // 注册命令
   registerScanCommands(context, sastScanner, diagnosticManager, aiFixProvider);
@@ -64,58 +118,27 @@ export async function activate(context: vscode.ExtensionContext) {
   // 注册自动扫描
   registerAutoScan(context, sastScanner, diagnosticManager);
 
-  // 尝试复用 Semgrep 插件（作为 Opengrep LSP Client）
-  void semgrepBridge.maybeEnableOpengrepBackend();
-  context.subscriptions.push(semgrepBridge);
-
-  // 检查 AI 可用性（不阻塞激活）
-  void aiFixProvider.checkAvailability().then((aiAvailable) => {
-    if (!aiAvailable) {
-      console.log('[GitAI SAST] AI not available');
-    } else {
-      console.log('[GitAI SAST] AI available');
-    }
-  });
-
-  // MCP Server: 配置变更时更新路径并尝试重连
-  const configDisposable = vscode.workspace.onDidChangeConfiguration((e) => {
-    if (!e.affectsConfiguration('gitai.sast.mcpServerPath')) {
-      return;
-    }
-
-    const newPath = vscode.workspace
-      .getConfiguration('gitai.sast')
-      .get<string>('mcpServerPath') || '';
-
-    mcpClient.updateServerPath(newPath);
-
-    if (newPath.trim()) {
-      void mcpClient.connect().then(
-        () => console.log('[GitAI SAST] MCP Server connected'),
-        (error) => console.error('[GitAI SAST] Failed to connect to MCP Server:', error)
-      );
-    }
-  });
-  context.subscriptions.push(configDisposable);
-
-  // MCP Server: 若已配置则后台连接（不阻塞激活/命令注册）
-  if (mcpServerPath.trim()) {
-    void mcpClient.connect().then(
-      () => console.log('[GitAI SAST] MCP Server connected'),
-      (error) => console.error('[GitAI SAST] Failed to connect to MCP Server:', error)
-    );
+  // 注册 Chat Participant
+  if ((vscode as any).chat?.createChatParticipant) {
+    chatParticipant.register(context);
   } else {
-    console.log('[GitAI SAST] MCP Server path not configured; scan commands will prompt when used.');
+    output.info('[Chat] Chat API not available; skipping registration.');
   }
+
+  // 检查 AI 可用性
+  void aiFixProvider.checkAvailability().then((aiAvailable) => {
+    output.info(`[AI] Fix Provider available: ${aiAvailable}`);
+  });
 
   // 清理资源
   context.subscriptions.push({
     dispose: () => {
       void mcpClient.disconnect();
+      void lspClient.stop();
     },
   });
 
-  console.log('[GitAI SAST] Extension activated successfully.');
+  output.info('GitAI SAST extension activated successfully.');
 }
 
 /**
@@ -166,18 +189,27 @@ function registerDiffViewerCommands(
   const showExplanationDisposable = vscode.commands.registerCommand(
     'gitai.sast.showExplanation',
     async (finding: any) => {
-      if (!finding || !finding.uri) {
+      if (!finding || !finding.location?.file) {
         vscode.window.showErrorMessage('No vulnerability selected for explanation');
         return;
       }
 
       try {
+        const document = await vscode.workspace.openTextDocument(vscode.Uri.file(finding.location.file));
+        const { getCodeSnippet } = require('./utils/fileUtils');
+        const codeSnippet = getCodeSnippet(document, finding);
+
         const suggestion = await aiFixProvider.generateFix(
           finding,
-          finding.code_snippet || ''
+          codeSnippet
         );
 
-        await FixExplanationPanel.show(finding, suggestion.suggestion);
+        await FixExplanationPanel.show(
+          finding,
+          suggestion.suggestion,
+          suggestion.thinking,
+          suggestion.code
+        );
       } catch (error) {
         vscode.window.showErrorMessage(`Failed to show explanation: ${error}`);
       }

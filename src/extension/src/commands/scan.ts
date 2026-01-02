@@ -2,7 +2,6 @@ import * as vscode from 'vscode';
 import { SastScanner } from '../core/SastScanner';
 import { DiagnosticManager } from '../core/DiagnosticManager';
 import { AiFixProvider } from '../ai/AiFixProvider';
-import { registerShowResultsCommand } from './showResults';
 
 /**
  * 注册扫描相关命令
@@ -133,9 +132,6 @@ export function registerScanCommands(
       );
     }
   );
-
-  // 注册显示结果命令
-  registerShowResultsCommand(context, diagnostics);
 
   context.subscriptions.push(
     scanFileDisposable,

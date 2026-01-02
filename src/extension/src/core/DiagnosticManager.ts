@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
 import { Finding, SastDiagnostic } from './types';
+import { EnhancedCodeActionProvider } from '../codeactions/EnhancedCodeActionProvider';
+import * as output from '../core/OutputLogger';
 
 /**
  * 诊断管理器 - 管理扫描发现的 Diagnostics
@@ -8,10 +10,11 @@ export class DiagnosticManager {
   private diagnostics = vscode.languages.createDiagnosticCollection('SAST');
   private currentFindings = new Map<string, Finding[]>();
   private diagnosticToFinding = new WeakMap<vscode.Diagnostic, Finding>();
-  private codeActionProvider: SastCodeActionProvider | null = null;
+  private codeActionProvider: vscode.CodeActionProvider | null = null;
+  private onDidChangeDiagnosticsEmitter = new vscode.EventEmitter<Finding[]>();
 
   constructor(context: vscode.ExtensionContext) {
-    this.codeActionProvider = new SastCodeActionProvider(this);
+    this.codeActionProvider = new EnhancedCodeActionProvider(this);
     context.subscriptions.push(
       vscode.languages.registerCodeActionsProvider(
         { scheme: 'file' },
@@ -25,10 +28,15 @@ export class DiagnosticManager {
    */
   updateDiagnostics(uri: vscode.Uri, findings: Finding[] | undefined): void {
     const safeFindings = Array.isArray(findings) ? findings : [];
+    output.info(`[DiagnosticManager] Updating diagnostics for ${uri.fsPath}. Count: ${safeFindings.length}`);
+
     const vscodeDiagnostics = safeFindings.map(finding => this.toVsCodeDiagnostic(uri, finding));
-    
+
     this.diagnostics.set(uri, vscodeDiagnostics);
     this.currentFindings.set(uri.toString(), safeFindings);
+
+    // 触发 Diagnostics 变化事件
+    this.onDidChangeDiagnosticsEmitter.fire(this.getAllFindings());
   }
 
   /**
@@ -37,6 +45,23 @@ export class DiagnosticManager {
   getFindings(uri: vscode.Uri): Finding[] {
     return this.currentFindings.get(uri.toString()) || [];
   }
+
+  /**
+   * 获取所有 Findings
+   */
+  getAllFindings(): Finding[] {
+    const allFindings: Finding[] = [];
+    this.currentFindings.forEach((findings, key) => {
+      output.info(`[DiagnosticManager] getAllFindings: Key=${key}, Count=${findings.length}`);
+      allFindings.push(...findings);
+    });
+    return allFindings;
+  }
+
+  /**
+   * Diagnostics 变化事件
+   */
+  readonly onDidChangeDiagnostics = this.onDidChangeDiagnosticsEmitter.event;
 
   /**
    * 清除所有 Diagnostics
@@ -94,7 +119,7 @@ export class DiagnosticManager {
   /**
    * 获取 Code Action 提供者
    */
-  getCodeActionProvider(): SastCodeActionProvider | null {
+  getCodeActionProvider(): vscode.CodeActionProvider | null {
     return this.codeActionProvider;
   }
 
@@ -108,8 +133,8 @@ export class DiagnosticManager {
     }
 
     const source = (diagnostic.source || '').trim().toLowerCase();
-    if (source === 'semgrep') {
-      return this.toFindingFromExternalDiagnostic(uri, diagnostic, 'semgrep');
+    if (source === 'semgrep' || source === 'opengrep') {
+      return this.toFindingFromExternalDiagnostic(uri, diagnostic, source);
     }
 
     const code = diagnostic.code;
@@ -159,56 +184,6 @@ export class DiagnosticManager {
       provider,
     };
   }
-}
-
-/**
- * SAST Code Action 提供者
- */
-class SastCodeActionProvider implements vscode.CodeActionProvider {
-  private onDidChangeCodeActionsEmitter = new vscode.EventEmitter<vscode.CodeAction[]>();
-
-  onDidChangeCodeActions = this.onDidChangeCodeActionsEmitter.event;
-
-  constructor(private diagnosticManager: DiagnosticManager) {}
-
-  provideCodeActions(
-    document: vscode.TextDocument,
-    range: vscode.Range | vscode.Selection,
-    context: vscode.CodeActionContext,
-    token: vscode.CancellationToken
-  ): vscode.ProviderResult<vscode.CodeAction[]> {
-    const actions: vscode.CodeAction[] = [];
-
-    // 为 GitAI(SAST) 以及 Semgrep 复用的 Diagnostics 提供 AI 修复
-    const supportedDiagnostics = context.diagnostics.filter(d => isSupportedDiagnosticSource(d.source));
-    
-    for (const diagnostic of supportedDiagnostics) {
-      const finding = this.diagnosticManager.getFindingFromDiagnostic(document.uri, diagnostic);
-      if (!finding) {
-        continue;
-      }
-
-      const aiFixAction = new vscode.CodeAction(
-        `AI Fix: ${finding.title}`,
-        vscode.CodeActionKind.QuickFix
-      );
-      aiFixAction.diagnostics = [diagnostic];
-      aiFixAction.isPreferred = actions.length === 0;
-      aiFixAction.command = {
-        command: 'gitai.sast.aiFix',
-        title: 'AI Fix',
-        arguments: [document.uri, finding],
-      };
-      actions.push(aiFixAction);
-    }
-
-    return actions;
-  }
-}
-
-function isSupportedDiagnosticSource(source: string | undefined): boolean {
-  const normalized = (source || '').trim().toLowerCase();
-  return normalized === 'sast' || normalized === 'semgrep';
 }
 
 function extractRuleId(code: vscode.Diagnostic['code']): string | undefined {

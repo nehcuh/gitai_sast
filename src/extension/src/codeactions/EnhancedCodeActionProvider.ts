@@ -6,15 +6,21 @@ import {
   SastCodeActionMetadata,
 } from './types';
 
+type FindingLookup = {
+  getFindingFromDiagnostic(
+    uri: vscode.Uri,
+    diagnostic: vscode.Diagnostic
+  ): Finding | undefined;
+};
+
 /**
  * Enhanced Code Action Provider - 增强的 Code Action 提供者
  */
 export class EnhancedCodeActionProvider
-  implements vscode.CodeActionProvider
-{
-  private diagnosticManager?: any; // DiagnosticManager (avoid circular import)
+  implements vscode.CodeActionProvider {
+  private diagnosticManager?: FindingLookup; // DiagnosticManager-like (avoid circular import)
 
-  constructor(diagnosticManager?: any) {
+  constructor(diagnosticManager?: FindingLookup) {
     this.diagnosticManager = diagnosticManager;
   }
 
@@ -34,11 +40,32 @@ export class EnhancedCodeActionProvider
       this.isSupportedDiagnostic(d.source)
     );
 
+    // Group diagnostics by Rule ID and start line to deduplicate
+    const groups = new Map<string, { finding: Finding; diagnostics: vscode.Diagnostic[] }>();
+
     for (const diagnostic of supportedDiagnostics) {
       const finding = this.getFindingFromDiagnostic(document.uri, diagnostic);
       if (!finding) {
         continue;
       }
+
+      const key = `${finding.rule_id}:${finding.location.line}`;
+      if (!groups.has(key)) {
+        groups.set(key, { finding, diagnostics: [] });
+      }
+
+      const group = groups.get(key)!;
+      group.diagnostics.push(diagnostic);
+
+      // If the current finding has a code snippet and the existing one doesn't, upgrade to the better finding
+      if (finding.code_snippet && !group.finding.code_snippet) {
+        group.finding = finding;
+      }
+    }
+
+    // Generate actions for each unique group
+    for (const group of groups.values()) {
+      const { finding, diagnostics } = group;
 
       // 为每个配置的 Action 创建 Code Action
       for (const actionMetadata of SAST_CODE_ACTIONS) {
@@ -54,7 +81,7 @@ export class EnhancedCodeActionProvider
           actionMetadata,
           document.uri,
           finding,
-          diagnostic
+          diagnostics
         );
 
         if (action) {
@@ -73,10 +100,11 @@ export class EnhancedCodeActionProvider
     metadata: SastCodeActionMetadata,
     uri: vscode.Uri,
     finding: Finding,
-    diagnostic: vscode.Diagnostic
+    diagnostics: vscode.Diagnostic[]
   ): vscode.CodeAction | null {
     // 替换标题中的占位符
-    const title = metadata.title.replace('{title}', finding.title);
+    const rawTitle = metadata.title.replace('{title}', finding.title);
+    const title = metadata.icon ? `${metadata.icon} ${rawTitle}` : rawTitle;
 
     // 创建 Code Action
     const action = new vscode.CodeAction(
@@ -84,8 +112,8 @@ export class EnhancedCodeActionProvider
       vscode.CodeActionKind.QuickFix
     );
 
-    // 设置诊断
-    action.diagnostics = [diagnostic];
+    // 设置诊断 (Attach ALL duplicates)
+    action.diagnostics = diagnostics;
 
     // 设置是否优先
     if (metadata.isPreferred) {
@@ -97,7 +125,7 @@ export class EnhancedCodeActionProvider
       metadata.kind,
       uri,
       finding,
-      diagnostic
+      diagnostics[0] // Use first diagnostic for command context if needed
     );
 
     if (command) {
@@ -182,7 +210,7 @@ export class EnhancedCodeActionProvider
     }
 
     const normalized = source.trim().toLowerCase();
-    return normalized === 'sast' || normalized === 'semgrep';
+    return normalized === 'sast' || normalized === 'semgrep' || normalized === 'opengrep';
   }
 
   /**
@@ -192,15 +220,22 @@ export class EnhancedCodeActionProvider
     uri: vscode.Uri,
     diagnostic: vscode.Diagnostic
   ): Finding | null {
-    // TODO: 从 DiagnosticManager 获取 Finding
-    // 暂时返回 null，待集成后实现
-    return null;
+    const manager = this.diagnosticManager;
+    if (!manager) {
+      return null;
+    }
+
+    if (typeof manager.getFindingFromDiagnostic !== 'function') {
+      return null;
+    }
+
+    return manager.getFindingFromDiagnostic(uri, diagnostic) || null;
   }
 
   /**
    * 设置 DiagnosticManager
    */
-  setDiagnosticManager(diagnosticManager: any): void {
+  setDiagnosticManager(diagnosticManager: FindingLookup): void {
     this.diagnosticManager = diagnosticManager;
   }
 }

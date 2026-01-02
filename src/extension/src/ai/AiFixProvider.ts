@@ -14,7 +14,7 @@ export class AiFixProvider {
   private languageModel: vscode.LanguageModelChat | null = null;
   private activeProvider: AiProvider | null = null;
 
-  constructor() {}
+  constructor() { }
 
   /**
    * 生成修复建议
@@ -45,7 +45,24 @@ export class AiFixProvider {
     if (!this.activeProvider) {
       const available = await this.checkAvailability();
       if (!available) {
-        throw new Error('No AI provider is available.');
+        // 提供更详细的错误信息帮助用户配置
+        if (settings.provider === 'openaiCompatible') {
+          const apiUrl = settings.apiUrl?.trim();
+          const modelName = settings.modelName?.trim();
+          if (!apiUrl) {
+            throw new Error('OpenAI Compatible API URL is not configured. Please set "gitai.sast.ai.apiUrl" in settings.');
+          }
+          if (!modelName) {
+            throw new Error('OpenAI Compatible model name is not configured. Please set "gitai.sast.ai.modelName" in settings.');
+          }
+          throw new Error('Could not connect to the AI API. Please check the URL is correct and the API is accessible.');
+        } else if (settings.provider === 'vscode') {
+          throw new Error('No VS Code Language Model available. Please install/enable a provider like GitHub Copilot Chat, or switch "gitai.sast.ai.provider" to "openaiCompatible".');
+        } else if (settings.provider === 'copilotAgent') {
+          throw new Error('GitHub Copilot Chat is not available. Please install/enable the Copilot Chat extension, or switch "gitai.sast.ai.provider" to "openaiCompatible".');
+        } else {
+          throw new Error('No AI provider is available. Please configure "gitai.sast.ai.provider" in settings.');
+        }
       }
     }
 
@@ -98,18 +115,18 @@ export class AiFixProvider {
           stream: options?.stream ?? settings.stream,
           onDelta: options?.onDelta
             ? (text: string) => {
-                options.onDelta!({ kind: 'content', text });
-              }
+              options.onDelta!({ kind: 'content', text });
+            }
             : undefined,
           onThinkingDelta: settings.enableThinking
             ? (text: string) => {
-                options?.onDelta?.({ kind: 'thinking', text });
-              }
+              options?.onDelta?.({ kind: 'thinking', text });
+            }
             : undefined,
           debugLog: debugEnabled
             ? (line: string) => {
-                output.debug(`[AI] ${line}`);
-              }
+              output.debug(`[AI] ${line}`);
+            }
             : undefined,
           debugMaxChars: settings.debugMaxChars,
         },
@@ -200,10 +217,9 @@ export class AiFixProvider {
    */
   private async checkOpenAiCompatibleAvailable(): Promise<boolean> {
     const config = vscode.workspace.getConfiguration('gitai.sast.ai');
-    return Boolean(
-      config.get<string>('apiUrl')?.trim() &&
-        config.get<string>('modelName')?.trim()
-    );
+    const apiUrl = config.get<string>('apiUrl')?.trim();
+    const modelName = config.get<string>('modelName')?.trim();
+    return Boolean(apiUrl && modelName);
   }
 
   private buildPrompts(
@@ -219,11 +235,30 @@ export class AiFixProvider {
 
     const userPromptTemplate =
       settings.userPromptTemplate ||
-      '## Vulnerability\n\n**Rule ID:** {rule_id}\n**Severity:** {severity}\n**Title:** {title}\n**Description:** {description}\n\n## Code\n\n```{language}\n{code}\n```\n\nPlease provide a detailed explanation and a fix suggestion.';
+      `## Vulnerability
+**Title:** {title}
+**Description:** {description}
+
+## Code
+\`\`\`{language}
+{code}
+\`\`\`
+
+## Task
+1. Analyze the vulnerability.
+2. Explain the risk and fix in **Chinese**.
+3. Provide the fixed code snippet.
+
+## Output Format
+Strictly follow this format:
+
+[SUGGESTION]
+(Your detailed explanation in Chinese here. Use Markdown.)
+
+[CODE]
+(The fixed code snippet here. Do NOT use markdown backticks for the code block itself, just raw code.)`;
 
     const userPrompt = renderTemplate(userPromptTemplate, {
-      rule_id: finding.rule_id,
-      severity: finding.severity,
       title: finding.title,
       description: finding.description || '',
       code: codeSnippet,
@@ -251,30 +286,61 @@ export class AiFixProvider {
   }
 
   private parseResponse(response: string, provider: string): AiFixResult {
-    // 尝试解析为 JSON
-    try {
-      const parsed = JSON.parse(response);
+    let suggestion = '';
+    let code = '';
 
-      if (parsed.suggestion && parsed.code) {
-        return {
-          suggestion: parsed.suggestion,
-          code: parsed.code,
-          provider,
-          thinking: parsed.thinking,
-        };
-      }
-    } catch {
-      // 不是 JSON，继续处理
+    // 1. Try to parse custom format [SUGGESTION] ... [CODE] ...
+    const suggestionMatch = response.match(/\[SUGGESTION\]([\s\S]*?)(\[CODE\]|$)/i);
+    const codeMatch = response.match(/\[CODE\]([\s\S]*?)$/i);
+
+    if (suggestionMatch) {
+      suggestion = suggestionMatch[1].trim();
     }
 
-    // 尝试提取代码块
-    const codeMatch = response.match(
-      /```(?:[\w-]+)?\s*\n([\s\S]*?)\n?```/
-    );
-    const code = codeMatch ? codeMatch[1].trim() : '';
+    if (codeMatch) {
+      let rawCode = codeMatch[1].trim();
+      // Remove potential markdown code block wrapping if the model ignored "no backticks" instruction
+      const mdMatch = rawCode.match(/^```(?:[\w-]+)?\s*\n?([\s\S]*?)\n?```$/);
+      if (mdMatch) {
+        rawCode = mdMatch[1].trim();
+      }
+      code = rawCode;
+    }
+
+    // 2. Fallback: JSON (backward compatibility / random model behavior)
+    if (!suggestion && !code) {
+      try {
+        const jsonMatch = response.match(/```json\s*([\s\S]*?)\s*```/);
+        const cleanJson = jsonMatch ? jsonMatch[1] : response;
+        // Search for JSON object if strictly not found
+        const firstOpen = cleanJson.indexOf('{');
+        const lastClose = cleanJson.lastIndexOf('}');
+        const jsonStr = (firstOpen !== -1 && lastClose > firstOpen) ? cleanJson.substring(firstOpen, lastClose + 1) : cleanJson;
+
+        const parsed = JSON.parse(jsonStr);
+        if (parsed && (parsed.suggestion || parsed.code)) {
+          suggestion = parsed.suggestion || '';
+          code = parsed.code || '';
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    // 3. Last resort: Treat full response as suggestion if it looks like natural language, 
+    // or try to extract code block if present.
+    if (!suggestion && !code) {
+      const fallbackCodeMatch = response.match(/```(?:[\w-]+)?\s*\n([\s\S]*?)\n?```/);
+      if (fallbackCodeMatch) {
+        code = fallbackCodeMatch[1].trim();
+        suggestion = response.replace(fallbackCodeMatch[0], '').trim();
+      } else {
+        suggestion = response;
+      }
+    }
 
     return {
-      suggestion: response,
+      suggestion: suggestion || 'No explanation provided.',
       code,
       provider,
     };

@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import MarkdownIt from 'markdown-it';
 import { Finding } from '../core/types';
 
 /**
@@ -6,40 +7,42 @@ import { Finding } from '../core/types';
  */
 export class FixExplanationPanel {
   private static currentPanel: FixExplanationPanel | undefined;
+  private static readonly markdownIt = new MarkdownIt({
+    html: false,
+    linkify: true,
+    typographer: true,
+  });
   private readonly panel: vscode.WebviewPanel;
   private readonly disposables: vscode.Disposable[] = [];
+  private mode: 'ai_fix' | 'details' = 'ai_fix';
   private fixCode: string = '';
 
   /**
    * 显示解释面板
-   *
-   * @param finding 漏洞信息
-   * @param suggestion AI 建议全文
-   * @param thinking AI 推理过程（可选）
-   * @param fixCode 修复代码（可选）
    */
   static async show(
     finding: Finding,
     suggestion: string,
     thinking?: string,
-    fixCode?: string
+    fixCode?: string,
+    mode: 'ai_fix' | 'details' = 'ai_fix'
   ): Promise<void> {
-    // 如果已有面板，直接使用
     if (FixExplanationPanel.currentPanel) {
       FixExplanationPanel.currentPanel.panel.reveal();
       FixExplanationPanel.currentPanel.updateContent(
         finding,
         suggestion,
         thinking,
-        fixCode
+        fixCode,
+        mode
       );
       return;
     }
 
-    // 创建新面板
+    const title = mode === 'details' ? `Details: ${finding.title}` : `AI Fix: ${finding.title}`;
     const panel = vscode.window.createWebviewPanel(
       'sast.aiFixExplanation',
-      `AI Fix: ${finding.title}`,
+      title,
       vscode.ViewColumn.Two,
       {
         enableScripts: true,
@@ -52,7 +55,8 @@ export class FixExplanationPanel {
       finding,
       suggestion,
       thinking,
-      fixCode
+      fixCode,
+      mode
     );
   }
 
@@ -61,16 +65,15 @@ export class FixExplanationPanel {
     private finding: Finding,
     private suggestion: string,
     private thinking?: string,
-    fixCode?: string
+    fixCode?: string,
+    mode: 'ai_fix' | 'details' = 'ai_fix'
   ) {
     this.panel = panel;
+    this.mode = mode;
     this.fixCode = fixCode || this.extractCodeFromSuggestion(suggestion) || '';
     this.panel.webview.html = this.getHtml();
 
-    // 监听面板关闭事件
     this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
-
-    // 监听来自 Webview 的消息
     this.panel.webview.onDidReceiveMessage(
       (message) => this.handleMessage(message),
       null,
@@ -78,25 +81,22 @@ export class FixExplanationPanel {
     );
   }
 
-  /**
-   * 更新面板内容
-   */
   private updateContent(
     finding: Finding,
     suggestion: string,
     thinking?: string,
-    fixCode?: string
+    fixCode?: string,
+    mode: 'ai_fix' | 'details' = 'ai_fix'
   ): void {
     this.finding = finding;
     this.suggestion = suggestion;
     this.thinking = thinking;
+    this.mode = mode;
     this.fixCode = fixCode || this.extractCodeFromSuggestion(suggestion) || '';
+    this.panel.title = mode === 'details' ? `Details: ${finding.title}` : `AI Fix: ${finding.title}`;
     this.panel.webview.html = this.getHtml();
   }
 
-  /**
-   * 生成 HTML 内容
-   */
   private getHtml(): string {
     const thinkingHtml = this.thinking
       ? `
@@ -107,20 +107,39 @@ export class FixExplanationPanel {
   `
       : '';
 
+    // Only show "Fix Code" section if we have code AND (it's AI fix mode OR explicitly provided in details mode)
+    // For details mode, we might typically only show if it's a specific remediation snippet, not the original code.
+    // However, currently we pass original code as 'fixCode' in showDetails.
+    // If mode is 'details', we label it 'Code Context' unless it's a fix.
+
+    // Dedent the code for display
+    const displayedCode = this.dedent(this.fixCode);
+
+    const fixCodeLabel = this.mode === 'details' ? '📄 Code Context' : '🔧 Fix Code';
     const fixCodeHtml = this.fixCode
       ? `
   <div>
-    <h3>🔧 Fix Code</h3>
-    <pre><code>${this.escapeHtml(this.fixCode)}</code></pre>
+    <h3>${fixCodeLabel}</h3>
+    <pre><code>${this.escapeHtml(displayedCode)}</code></pre>
   </div>
   `
       : '';
 
-    const applyFixButton = this.fixCode
+    // Only show "Apply Fix" / "Preview Fix" if in AI Fix mode
+    const actionsHtml = (this.fixCode && this.mode === 'ai_fix')
       ? `
+    <button class="btn-secondary" onclick="previewFix()">Preview Fix</button>
     <button class="btn-primary" onclick="applyFix()">Apply Fix</button>
     `
       : '';
+
+    // In details mode, if suggestion == description, don't show "AI Suggestion" block if it's redundant
+    const showSuggestion = this.mode === 'ai_fix' || (this.suggestion && this.suggestion !== this.finding.description);
+    const suggestionHtml = showSuggestion ? `
+  <div class="suggestion">
+    <h3>💡 AI Suggestion</h3>
+    <div class="markdown-body">${this.renderMarkdown(this.suggestion)}</div>
+  </div>` : '';
 
     return `<!DOCTYPE html>
 <html>
@@ -129,172 +148,63 @@ export class FixExplanationPanel {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AI Fix Explanation</title>
   <style>
-    body {
-      font-family: var(--vscode-font-family);
-      padding: 20px;
-      color: var(--vscode-foreground);
-      background: var(--vscode-editor-background);
-    }
-
-    .finding {
-      background: var(--vscode-textBlockQuote-background);
-      padding: 15px;
-      border-radius: 5px;
-      margin-bottom: 20px;
-      border-left: 4px solid var(--vscode-editorInfo-foreground);
-    }
-
-    .finding h3 {
-      margin: 0 0 10px 0;
-      color: var(--vscode-editorInfo-foreground);
-    }
-
-    .finding p {
-      margin: 5px 0;
-    }
-
-    .finding strong {
-      color: var(--vscode-foreground);
-    }
-
-    .thinking {
-      background: var(--vscode-editor-inactiveSelectionBackground);
-      padding: 15px;
-      border-radius: 5px;
-      margin-bottom: 20px;
-    }
-
-    .thinking h3 {
-      margin: 0 0 10px 0;
-      color: var(--vscode-editor-foreground);
-    }
-
-    .suggestion {
-      background: var(--vscode-textLink-foreground);
-      color: var(--vscode-editor-background);
-      padding: 15px;
-      border-radius: 5px;
-      margin-bottom: 20px;
-    }
-
-    .suggestion h3 {
-      margin: 0 0 10px 0;
-    }
-
-    pre {
-      background: var(--vscode-textCodeBlock-background);
-      padding: 10px;
-      border-radius: 5px;
-      overflow-x: auto;
-      white-space: pre-wrap;
-      margin: 10px 0;
-    }
-
-    code {
-      font-family: var(--vscode-editor-font-family);
-      font-size: var(--vscode-editor-font-size);
-    }
-
-    .actions {
-      margin-top: 20px;
-      display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
-    }
-
-    button {
-      padding: 8px 16px;
-      border: none;
-      border-radius: 4px;
-      cursor: pointer;
-      font-family: var(--vscode-font-family);
-      transition: opacity 0.2s;
-    }
-
-    button:hover {
-      opacity: 0.9;
-    }
-
-    .btn-primary {
-      background: var(--vscode-button-background);
-      color: var(--vscode-button-foreground);
-    }
-
-    .btn-secondary {
-      background: var(--vscode-button-secondaryBackground);
-      color: var(--vscode-button-secondaryForeground);
-    }
-
-    .tag {
-      display: inline-block;
-      padding: 2px 6px;
-      border-radius: 3px;
-      font-size: 12px;
-      margin-right: 5px;
-    }
-
-    .tag.severity-high {
-      background: #f44336;
-      color: white;
-    }
-
-    .tag.severity-medium {
-      background: #ff9800;
-      color: white;
-    }
-
-    .tag.severity-low {
-      background: #4caf50;
-      color: white;
-    }
-
-    .tag.severity-critical {
-      background: #d32f2f;
-      color: white;
-    }
-
-    .info {
-      font-size: 12px;
-      color: var(--vscode-descriptionForeground);
-      margin-top: 10px;
-    }
+    /* ... styles ... */
+    body { font-family: var(--vscode-font-family); padding: 20px; color: var(--vscode-foreground); background: var(--vscode-editor-background); }
+    .finding { background: var(--vscode-textBlockQuote-background); padding: 15px; border-radius: 5px; margin-bottom: 20px; border-left: 4px solid var(--vscode-editorInfo-foreground); }
+    .finding h3 { margin: 0 0 10px 0; color: var(--vscode-editorInfo-foreground); }
+    .finding p { margin: 5px 0; }
+    .finding strong { color: var(--vscode-foreground); }
+    .thinking { background: var(--vscode-editor-inactiveSelectionBackground); padding: 15px; border-radius: 5px; margin-bottom: 20px; }
+    .thinking h3 { margin: 0 0 10px 0; color: var(--vscode-editor-foreground); }
+    .suggestion { background: var(--vscode-textLink-foreground); color: var(--vscode-editor-background); padding: 15px; border-radius: 5px; margin-bottom: 20px; }
+    .suggestion h3 { margin: 0 0 10px 0; }
+    pre { background: var(--vscode-textCodeBlock-background); padding: 10px; border-radius: 5px; overflow-x: auto; white-space: pre-wrap; margin: 10px 0; }
+    code { font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); }
+    .actions { margin-top: 20px; display: flex; gap: 10px; flex-wrap: wrap; }
+    button { padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; font-family: var(--vscode-font-family); transition: opacity 0.2s; }
+    button:hover { opacity: 0.9; }
+    .btn-primary { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+    .btn-secondary { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
+    .tag { display: inline-block; padding: 2px 6px; border-radius: 3px; font-size: 12px; margin-right: 5px; }
+    .tag.severity-high { background: #f44336; color: white; }
+    .tag.severity-medium { background: #ff9800; color: white; }
+    .tag.severity-low { background: #4caf50; color: white; }
+    .tag.severity-critical { background: #d32f2f; color: white; }
+    .info { font-size: 12px; color: var(--vscode-descriptionForeground); margin-top: 10px; }
   </style>
 </head>
 <body>
   <div class="finding">
     <h3>📌 Vulnerability</h3>
-    <p>
-      <span class="tag severity-${this.finding.severity}">${this.finding.severity.toUpperCase()}</span>
-      <strong>Rule ID:</strong> ${this.escapeHtml(this.finding.rule_id)}
-    </p>
+    <p><span class="tag severity-${this.finding.severity}">${this.finding.severity.toUpperCase()}</span> <strong>Rule ID:</strong> ${this.escapeHtml(this.finding.rule_id)}</p>
     <p><strong>Title:</strong> ${this.escapeHtml(this.finding.title)}</p>
     <p><strong>Description:</strong> ${this.escapeHtml(this.finding.description)}</p>
   </div>
 
   ${thinkingHtml}
-
-  <div class="suggestion">
-    <h3>💡 AI Suggestion</h3>
-    <div>${this.escapeHtml(this.suggestion)}</div>
-  </div>
-
+  ${suggestionHtml}
   ${fixCodeHtml}
 
   <div class="actions">
-    ${applyFixButton}
+    ${actionsHtml}
     <button class="btn-secondary" onclick="copyCode()">Copy Code</button>
     <button class="btn-secondary" onclick="dismiss()">Dismiss</button>
   </div>
 
   <div class="info">
-    Click "Apply Fix" to automatically apply fix to editor.
+    ${this.mode === 'ai_fix' ? 'Click "Apply Fix" to automatically apply fix to editor.' : ''}
   </div>
+
 
   <script>
     const vscode = acquireVsCodeApi();
 
     function applyFix() {
       vscode.postMessage({ command: 'applyFix' });
+    }
+
+    function previewFix() {
+      vscode.postMessage({ command: 'previewFix' });
     }
 
     function copyCode() {
@@ -307,6 +217,15 @@ export class FixExplanationPanel {
   </script>
 </body>
 </html>`;
+  }
+
+  private renderMarkdown(markdown: string): string {
+    try {
+      return FixExplanationPanel.markdownIt.render(markdown || '');
+    } catch (error) {
+      console.warn('[FixExplanationPanel] Failed to render markdown:', error);
+      return `<pre><code>${this.escapeHtml(markdown || '')}</code></pre>`;
+    }
   }
 
   /**
@@ -329,6 +248,9 @@ export class FixExplanationPanel {
       case 'applyFix':
         this.handleApplyFix();
         break;
+      case 'previewFix':
+        this.handlePreviewFix();
+        break;
       case 'copyCode':
         this.handleCopyCode();
         break;
@@ -336,6 +258,29 @@ export class FixExplanationPanel {
         this.panel.dispose();
         break;
     }
+  }
+
+  /**
+   * 处理预览修复 (Diff View)
+   */
+  private async handlePreviewFix(): Promise<void> {
+    if (!this.fixCode) return;
+
+    // 导入 FixDiffViewer
+    const { FixDiffViewer } = await import('./FixDiffViewer');
+
+    // 我们需要原始文档的 URI
+    // 尝试解析 finding.location.file
+    // 注意：finding.location.file 可能是 fsPath
+    const uri = vscode.Uri.file(this.finding.location.file);
+
+    await FixDiffViewer.showFixDiff(
+      uri,
+      this.finding,
+      this.fixCode,
+      this.suggestion, // Pass suggestion to keep panel open/updated
+      this.thinking
+    );
   }
 
   /**
@@ -347,10 +292,32 @@ export class FixExplanationPanel {
       return;
     }
 
-    // 获取当前活动的编辑器
-    const editor = vscode.window.activeTextEditor;
+    // 获取对应文件的编辑器
+    let editor = vscode.window.activeTextEditor;
+
+    // 如果当前活动的编辑器不是目标文件，尝试找到已打开的对应文件
+    if (!editor || (editor.document.uri.fsPath !== this.finding.location.file && editor.document.uri.path !== this.finding.location.file)) {
+      // 1. 尝试在可见编辑器中查找
+      const visible = vscode.window.visibleTextEditors.find(e =>
+        e.document.uri.fsPath === this.finding.location.file || e.document.uri.path === this.finding.location.file
+      );
+
+      if (visible) {
+        editor = visible;
+      } else {
+        // 2. 尝试打开文档
+        try {
+          const doc = await vscode.workspace.openTextDocument(this.finding.location.file);
+          editor = await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
+        } catch (e) {
+          vscode.window.showErrorMessage(`Could not open file: ${this.finding.location.file}`);
+          return;
+        }
+      }
+    }
+
     if (!editor) {
-      vscode.window.showWarningMessage('No active editor');
+      vscode.window.showWarningMessage('Could not find editor for this file');
       return;
     }
 
@@ -398,13 +365,29 @@ export class FixExplanationPanel {
       return match[1].trim();
     }
 
-    // 如果没有代码块，返回整个建议（去除首尾空行）
-    const trimmed = suggestion.trim();
-    if (trimmed) {
-      return trimmed;
+    return null;
+  }
+
+  private dedent(str: string): string {
+    const lines = str.split('\n');
+    if (lines.length === 0) return str;
+
+    // Find minimum indentation of non-empty lines
+    let minIndent = Infinity;
+    for (const line of lines) {
+      if (line.trim().length === 0) continue;
+      const indent = line.search(/\S/);
+      if (indent !== -1 && indent < minIndent) {
+        minIndent = indent;
+      }
     }
 
-    return null;
+    if (minIndent === Infinity || minIndent === 0) return str;
+
+    return lines.map(line => {
+      if (line.trim().length === 0) return '';
+      return line.slice(minIndent);
+    }).join('\n');
   }
 
   /**

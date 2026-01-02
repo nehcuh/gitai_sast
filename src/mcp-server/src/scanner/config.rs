@@ -53,6 +53,8 @@ fn default_scan_config() -> BaseScanConfig {
         remote_user_id: String::new(),
         remote_allow_invalid_certs: false,
         remote_ca_cert_path: String::new(),
+        opengrep_path: None,
+        opengrep_rules: None,
     }
 }
 

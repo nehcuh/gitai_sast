@@ -2,7 +2,7 @@
   "name": "gitai-sast",
   "displayName": "GitAI SAST",
   "description": "AI-powered static code analysis for VSCode",
-  "version": "0.1.10",
+  "version": "0.1.27",
   "publisher": "gitai",
   "engines": {
     "vscode": "^1.80.0"
@@ -16,6 +16,7 @@
     "onCommand:gitai.sast.scanWorkspace",
     "onCommand:gitai.sast.showResults",
     "onCommand:gitai.sast.aiFix",
+    "onCommand:gitai.sast.restartLsp",
     "onLanguage:typescript",
     "onLanguage:javascript",
     "onLanguage:python",
@@ -44,6 +45,37 @@
         "command": "gitai.sast.aiFix",
         "title": "AI Fix Vulnerability",
         "category": "GitAI SAST"
+      },
+      {
+        "command": "gitai.sast.restartLsp",
+        "title": "Restart Opengrep LSP",
+        "category": "GitAI SAST"
+      }
+    ],
+    "chatParticipants": [
+      {
+        "id": "gitai.sast.chatParticipant",
+        "name": "sast",
+        "description": "Security analysis and AI fixes",
+        "isSticky": true,
+        "commands": [
+          {
+            "name": "explain",
+            "description": "Explain vulnerabilities in detail"
+          },
+          {
+            "name": "fix",
+            "description": "Generate AI-powered fixes"
+          },
+          {
+            "name": "taint",
+            "description": "Show taint analysis paths"
+          },
+          {
+            "name": "scan",
+            "description": "Scan current file or workspace"
+          }
+        ]
       }
     ],
     "configuration": {
@@ -54,9 +86,24 @@
           "default": "",
           "description": "Path to MCP Server binary"
         },
+        "gitai.sast.opengrepPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to Opengrep binary (empty: use PATH or cached version)"
+        },
+        "gitai.sast.opengrepRules": {
+          "type": "string",
+          "default": "",
+          "description": "Path to Opengrep rules directory or YAML file (empty: use default 'auto' config)"
+        },
         "gitai.sast.severityThreshold": {
           "type": "string",
-          "enum": ["low", "medium", "high", "critical"],
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "critical"
+          ],
           "default": "medium",
           "description": "Minimum severity level to report"
         },
@@ -92,9 +139,32 @@
         },
         "gitai.sast.ai.provider": {
           "type": "string",
-          "enum": ["disabled", "vscode", "openaiCompatible"],
-          "default": "vscode",
-          "description": "AI provider for fix suggestions (disabled, VS Code built-in models, or OpenAI-compatible API)"
+          "enum": [
+            "auto",
+            "disabled",
+            "vscode",
+            "openaiCompatible",
+            "copilotAgent"
+          ],
+          "default": "auto",
+          "description": "AI provider for fix suggestions (auto-detect, disabled, VS Code built-in models, OpenAI-compatible API, or Copilot Agent)"
+        },
+        "gitai.sast.ai.autoDetectPriority": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "copilotAgent",
+              "vscode",
+              "openaiCompatible"
+            ]
+          },
+          "default": [
+            "copilotAgent",
+            "vscode",
+            "openaiCompatible"
+          ],
+          "description": "Priority order for auto-detecting AI providers (used when gitai.sast.ai.provider=auto)"
         },
         "gitai.sast.ai.apiUrl": {
           "type": "string",
@@ -161,12 +231,12 @@
   "scripts": {
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "pretest": "npm run compile && npm run lint && npm run copy-tests",
+    "pretest": "npm run compile && npm run lint",
     "lint": "eslint src --ext ts",
-    "test": "node ./dist/test/runTest.js",
-    "copy-tests": "node ./scripts/copy-tests.js"
+    "test": "node ./dist/test/runTest.js"
   },
   "devDependencies": {
+    "@types/markdown-it": "^14.1.2",
     "@types/mocha": "^10.0.10",
     "@types/node": "^18.0.0",
     "@types/vscode": "^1.80.0",
@@ -178,6 +248,8 @@
     "typescript": "^5.1.6"
   },
   "dependencies": {
-    "uuid": "^9.0.0"
+    "markdown-it": "^14.1.0",
+    "uuid": "^9.0.0",
+    "vscode-languageclient": "^9.0.1"
   }
 }

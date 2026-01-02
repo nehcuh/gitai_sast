@@ -2,12 +2,16 @@ import * as vscode from 'vscode';
 import { AiFixProvider } from '../../ai/AiFixProvider';
 import { Finding } from '../../core/types';
 import { FixExplanationPanel } from '../../ui/FixExplanationPanel';
+import { DiagnosticManager } from '../../core/DiagnosticManager';
 
 /**
  * Fix 命令处理器
  */
 export class FixHandler {
-  constructor(private aiFixProvider: AiFixProvider) {}
+  constructor(
+    private aiFixProvider: AiFixProvider,
+    private diagnostics: DiagnosticManager
+  ) {}
 
   /**
    * 处理 Fix 命令
@@ -72,8 +76,6 @@ export class FixHandler {
    * 获取 Findings
    */
   private async getFindings(uri: vscode.Uri): Promise<Finding[]> {
-    // TODO: 从 DiagnosticManager 获取 findings
-    // 暂时返回空列表
-    return [];
+    return this.diagnostics.getFindings(uri);
   }
 }

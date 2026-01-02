@@ -12,23 +12,35 @@ export function registerShowDetailsCommand(
     vscode.commands.registerCommand(
       'gitai.sast.showDetails',
       async (uri: vscode.Uri, finding: Finding) => {
-        if (!finding) {
+        if (!finding || !finding.location?.file) {
           vscode.window.showErrorMessage('Missing vulnerability details');
           return;
         }
 
-        // 使用 FixExplanationPanel 显示详情
-        const suggestion =
-          finding.description ||
-          'No description available for this vulnerability.';
-        const code = finding.code_snippet || '';
+        try {
+          const document = await vscode.workspace.openTextDocument(vscode.Uri.file(finding.location.file));
+          // Import dynamically or assume it's available via module system
+          const { getCodeSnippet } = require('../utils/fileUtils');
 
-        await FixExplanationPanel.show(
-          finding,
-          suggestion,
-          undefined, // thinking
-          code // fixCode (使用 code_snippet 作为示例)
-        );
+          const code = getCodeSnippet(document, finding);
+          const suggestion = finding.description || 'No description available for this vulnerability.';
+
+          await FixExplanationPanel.show(
+            finding,
+            suggestion,
+            undefined, // thinking
+            code
+          );
+        } catch (e) {
+          console.error('[ShowDetails] Failed to load document:', e);
+          // Fallback if file cannot be opened
+          await FixExplanationPanel.show(
+            finding,
+            finding.description || '',
+            undefined,
+            finding.code_snippet || ''
+          );
+        }
       }
     )
   );

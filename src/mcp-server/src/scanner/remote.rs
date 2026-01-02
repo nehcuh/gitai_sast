@@ -91,8 +91,8 @@ impl RemoteSastScanner {
         &self,
         root: String,
         files: HashMap<String, String>,
-        ignores: Vec<IgnoreItem>,
-        config: &ScanConfig,
+        _ignores: Vec<IgnoreItem>,
+        _config: &ScanConfig,
     ) -> ScannerScanResult<ScanResult> {
         // 设置总扫描超时时间（根据文件数量动态调整）
         let files_count = files.len();
@@ -225,12 +225,33 @@ impl RemoteSastScanner {
             .send()
             .await?;
         
+        let response_status = response.status();
         let response_bytes = response.bytes().await?;
-        let response_json: Value = serde_json::from_slice(&response_bytes)?;
-        
+        let response_text = String::from_utf8_lossy(&response_bytes);
+
+        debug!("Upload response status: {}", response_status);
+        debug!("Upload response body: {}", response_text);
+
+        let response_result: Result<Value, serde_json::Error> = serde_json::from_slice(&response_bytes);
+        let response_json = match response_result {
+            Ok(json) => json,
+            Err(e) => {
+                return Err(ScanError::Upload(format!(
+                    "Upload failed: HTTP {}, response not valid JSON: {}",
+                    response_status, response_text
+                )));
+            }
+        };
+
         if response_json["code"].as_str() != Some("1") {
             let msg = response_json["msg"].as_str().unwrap_or("Unknown error");
-            return Err(ScanError::Upload(msg.to_string()));
+            let result_info = response_json.get("resultInfo");
+            return Err(ScanError::Upload(format!(
+                "Upload failed: {} (code: {}, response: {})",
+                msg,
+                response_json.get("code").unwrap_or(&json!("?")),
+                response_json
+            )));
         }
         
         let file_path = response_json["msg"].as_str()
@@ -264,12 +285,31 @@ impl RemoteSastScanner {
             .send()
             .await?;
         
+        let response_status = response.status();
         let response_bytes = response.bytes().await?;
-        let response_json: Value = serde_json::from_slice(&response_bytes)?;
-        
+        let response_text = String::from_utf8_lossy(&response_bytes);
+
+        debug!("Submit scan response status: {}", response_status);
+        debug!("Submit scan response body: {}", response_text);
+
+        let response_result: Result<Value, serde_json::Error> = serde_json::from_slice(&response_bytes);
+        let response_json = match response_result {
+            Ok(json) => json,
+            Err(e) => {
+                return Err(ScanError::ScanFailed(format!(
+                    "Submit scan failed: HTTP {}, response not valid JSON: {}",
+                    response_status, response_text
+                )));
+            }
+        };
+
         if response_json["code"].as_str() != Some("1") {
             let msg = response_json["msg"].as_str().unwrap_or("Unknown error");
-            return Err(ScanError::ScanFailed(msg.to_string()));
+            return Err(ScanError::ScanFailed(format!(
+                "Submit scan failed: {} (code: {})",
+                msg,
+                response_json.get("code").unwrap_or(&json!("?"))
+            )));
         }
         
         let result_info = response_json["resultInfo"].as_object()
@@ -605,6 +645,11 @@ impl RemoteSastScanner {
                         },
                         code_snippet,
                         fix: None,
+                        issue_content: if record.issue_content.trim().is_empty() {
+                            None
+                        } else {
+                            Some(record.issue_content.clone())
+                        },
                         provider: "remote".to_string(),
                     }
                 }

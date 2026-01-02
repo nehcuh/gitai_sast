@@ -25,12 +25,12 @@ export async function createChatCompletion(
 ): Promise<string> {
   const apiUrl = options.apiUrl.trim();
   if (!apiUrl) {
-    throw new Error('Missing gitai.sast.ai.apiUrl');
+    throw new Error('Missing gitai.sast.ai.apiUrl - please configure the API URL in settings.');
   }
 
   const model = options.model.trim();
   if (!model) {
-    throw new Error('Missing gitai.sast.ai.modelName');
+    throw new Error('Missing gitai.sast.ai.modelName - please configure the model name in settings.');
   }
 
   const debugLog = typeof options.debugLog === 'function' ? options.debugLog : undefined;
@@ -70,16 +70,30 @@ export async function createChatCompletion(
           'Content-Length': body.length,
           'Authorization': options.apiKey ? `Bearer ${options.apiKey}` : '',
         },
+        timeout: options.timeoutMs,
       },
       (response) => {
         let data = '';
 
         if (response.statusCode !== 200) {
-          reject(
-            new Error(
-              `HTTP ${response.statusCode}: ${response.statusMessage}`
-            )
-          );
+          let errorBody = '';
+          response.on('data', (chunk: Buffer) => {
+            errorBody += chunk.toString();
+          });
+          response.on('end', () => {
+            let errorMessage = `HTTP ${response.statusCode}: ${response.statusMessage}`;
+            if (errorBody) {
+              try {
+                const parsed = JSON.parse(errorBody);
+                if (parsed.error && parsed.error.message) {
+                  errorMessage += ` - ${parsed.error.message}`;
+                }
+              } catch {
+                // Ignore malformed JSON error body.
+              }
+            }
+            reject(new Error(errorMessage));
+          });
           return;
         }
 
@@ -196,15 +210,19 @@ export async function createChatCompletion(
     );
 
     request.on('error', (error) => {
-      reject(error);
+      // Improve error message for socket hang up
+      if (error instanceof Error && error.message === 'socket hang up') {
+        reject(new Error(`Connection failed: Could not reach AI API at ${apiUrl}. Please check the API URL and network connection.`));
+      } else {
+        reject(error);
+      }
     });
 
     request.on('timeout', () => {
       request.destroy();
-      reject(new Error('Request timeout'));
+      reject(new Error(`Request timeout (${options.timeoutMs}ms) - the AI API did not respond in time.`));
     });
 
-    request.setTimeout(options.timeoutMs);
     request.write(body);
     request.end();
   });

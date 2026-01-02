@@ -54,8 +54,8 @@ export function registerAiFixCommand(
 
       const fixOptions: GenerateFixOptions | undefined = streamPreview
         ? {
-            onDelta: (delta) => streamPreview.append(delta.kind, delta.text),
-          }
+          onDelta: (delta) => streamPreview.append(delta.kind, delta.text),
+        }
         : undefined;
 
       try {
@@ -270,25 +270,8 @@ function getWorkspaceRoot(uri: vscode.Uri): string {
 }
 
 function getCodeSnippet(document: vscode.TextDocument, finding: Finding): string {
-  const snippet = finding.code_snippet?.trim();
-  if (snippet) {
-    return snippet;
-  }
-
-  const lineIndex = clamp((finding.location?.line ?? 1) - 1, 0, document.lineCount - 1);
-  const before = 6;
-  const after = 6;
-
-  const startLine = Math.max(0, lineIndex - before);
-  const endLine = Math.min(document.lineCount - 1, lineIndex + after);
-  const endChar = document.lineAt(endLine).text.length;
-
-  const range = new vscode.Range(
-    new vscode.Position(startLine, 0),
-    new vscode.Position(endLine, endChar)
-  );
-
-  return document.getText(range);
+  const { getCodeSnippet } = require('../utils/fileUtils');
+  return getCodeSnippet(document, finding);
 }
 
 async function openSuggestion(

@@ -1,4 +1,5 @@
 import { ChildProcessWithoutNullStreams, spawn } from 'child_process';
+import * as output from './OutputLogger';
 import { McpRequest, McpResponse } from './types';
 
 /**
@@ -20,7 +21,6 @@ export class McpClient {
     if (next === this.serverPath) {
       return;
     }
-
     this.serverPath = next;
     void this.disconnect();
   }
@@ -47,33 +47,36 @@ export class McpClient {
       throw new Error('MCP Server path is not configured. Set "gitai.sast.mcpServerPath" in Settings.');
     }
 
-    const child = spawn(this.serverPath, [], {
+    const serverPath = this.serverPath.trim();
+    output.info(`[MCP] Connecting to server: ${serverPath}`);
+
+    const child = spawn(serverPath, [], {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
+
     this.process = child;
 
     // 监听 stdout (响应)
     child.stdout?.on('data', (data: Buffer) => {
       const lines = data.toString().split('\n').filter(l => l.trim());
-      
       for (const line of lines) {
         try {
           const response: McpResponse = JSON.parse(line);
           this.handleResponse(response);
         } catch (error) {
-          console.error('Failed to parse MCP response:', error, line);
+          output.warn(`[MCP] Failed to parse response: ${line}`);
         }
       }
     });
 
     // 监听 stderr (日志)
     child.stderr?.on('data', (data: Buffer) => {
-      console.error('[MCP Server]', data.toString());
+      output.warn(`[MCP Server] ${data.toString().trim()}`);
     });
 
     // 监听退出
     child.on('close', (code: number) => {
-      console.log(`[MCP Server] Exited with code ${code}`);
+      output.info(`[MCP Server] Exited with code ${code}`);
       this.process = null;
       this.rejectAllPendingRequests(new Error('MCP Server disconnected'));
     });
@@ -94,7 +97,7 @@ export class McpClient {
         settled = true;
         cleanup();
         this.process = null;
-        reject(error);
+        reject(new Error(`Failed to start MCP Server: ${error.message}`));
       };
 
       const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
@@ -117,6 +120,7 @@ export class McpClient {
         }
         settled = true;
         cleanup();
+        output.info('[MCP] Connected to server');
         resolve();
       }, 500);
     });
@@ -141,7 +145,6 @@ export class McpClient {
     }
 
     const id = (++this.requestId).toString();
-    
     const request: McpRequest = {
       jsonrpc: '2.0',
       id,
@@ -171,16 +174,15 @@ export class McpClient {
    */
   private handleResponse(response: McpResponse): void {
     const pending = this.pendingRequests.get(response.id);
-    
     if (!pending) {
-      console.error('Received response for unknown request:', response.id);
+      output.warn(`[MCP] Received response for unknown request: ${response.id}`);
       return;
     }
 
     this.pendingRequests.delete(response.id);
 
     if (response.error) {
-      pending.reject(new Error(response.error.message));
+      pending.reject(new Error(response.error.message || 'MCP Server error'));
     } else {
       pending.resolve(response.result);
     }
@@ -190,11 +192,11 @@ export class McpClient {
    * 调用工具
    */
   async callTool(name: string, args: any): Promise<any> {
+    output.debug(`[MCP] Calling tool: ${name}`);
     const result = await this.sendRequest('tools/call', {
       name,
       arguments: args,
     });
-
     return this.unwrapToolCallResult(name, result);
   }
 

@@ -181,7 +181,10 @@ impl ScanTool {
             // 使用本地 Opengrep 扫描器
             info!("Using local Opengrep scanner");
             
-            let scanner = OpengrepScanner::new(None);
+            let scanner = OpengrepScanner::new(
+                request.config.opengrep_path.clone(),
+                request.config.opengrep_rules.clone(),
+            );
             
             return scanner.scan(
                 &request.root,
