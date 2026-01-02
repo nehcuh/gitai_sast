@@ -268,6 +268,45 @@ Strictly follow this format:
     return { system: systemPrompt, user: userPrompt };
   }
 
+  private buildExplainPrompts(
+    finding: Finding,
+    codeSnippet: string,
+    context?: any
+  ): { system: string; user: string } {
+    const settings = this.getAiSettings();
+
+    const systemPrompt =
+      settings.systemPrompt ||
+      'You are a security analyst and code reviewer. Your task is to explain security vulnerabilities clearly and provide remediation suggestions.';
+
+    const userPromptTemplate =
+      `## Vulnerability
+**Title:** {title}
+**Description:** {description}
+
+## Code
+\`\`\`{language}
+{code}
+\`\`\`
+
+## Task
+1. Explain why this is a security vulnerability.
+2. Describe the potential impact.
+3. Explain how to fix it in **Chinese**.
+
+## Output Format
+Use Markdown. Be concise but partial to the technical details.`;
+
+    const userPrompt = renderTemplate(userPromptTemplate, {
+      title: finding.title,
+      description: finding.description || '',
+      code: codeSnippet,
+      language: 'plaintext',
+    });
+
+    return { system: systemPrompt, user: userPrompt };
+  }
+
   private async ensureVsCodeLanguageModel(): Promise<vscode.LanguageModelChat> {
     if (this.languageModel) {
       return this.languageModel;
@@ -283,6 +322,112 @@ Strictly follow this format:
     }
 
     return this.languageModel;
+  }
+
+  /**
+   * 生成漏洞解释
+   */
+  async generateExplanation(
+    finding: Finding,
+    codeSnippet: string,
+    context?: any,
+    options?: GenerateFixOptions
+  ): Promise<string> {
+    const settings = this.getAiSettings();
+    const debugEnabled = settings.debugLogging;
+
+    if (debugEnabled) {
+      output.showOutputLogger(true);
+      output.info(
+        `[AI] generateExplanation rule_id=${finding.rule_id} severity=${finding.severity} provider=${settings.provider}`
+      );
+    }
+
+    if (settings.provider === 'disabled') {
+      throw new Error(
+        'AI provider is disabled. Set "gitai.sast.ai.provider" to enable AI features.'
+      );
+    }
+
+    // 确保可用性并设置 activeProvider
+    if (!this.activeProvider) {
+      const available = await this.checkAvailability();
+      if (!available) {
+        throw new Error('No AI provider is available. Please configure "gitai.sast.ai.provider" in settings.');
+      }
+    }
+
+    const prompts = this.buildExplainPrompts(finding, codeSnippet, context);
+
+    if (this.activeProvider === 'vscode') {
+      const model = await this.ensureVsCodeLanguageModel();
+      const prompt = `${prompts.system}\n\n${prompts.user}`.trim();
+
+      if (debugEnabled) {
+        output.debug(
+          `[AI] provider=vscode prompt=${truncateForLog(prompt, settings.debugMaxChars)}`
+        );
+      }
+
+      const messages: vscode.LanguageModelChatMessage[] = [
+        vscode.LanguageModelChatMessage.User(prompt),
+      ];
+
+      const response = await model.sendRequest(messages, {}, options?.token);
+      let responseText = '';
+
+      for await (const chunk of response.text) {
+        responseText += chunk;
+        if (options?.onDelta) {
+          options.onDelta({
+            kind: 'content',
+            text: chunk,
+          });
+        }
+      }
+
+      return responseText;
+    } else if (this.activeProvider === 'openaiCompatible') {
+      const messages: OpenAiCompatibleChatMessage[] = [
+        { role: 'system', content: prompts.system },
+        { role: 'user', content: prompts.user },
+      ];
+
+      const response = await createChatCompletion(
+        {
+          apiUrl: settings.apiUrl,
+          apiKey: settings.apiKey,
+          model: settings.modelName,
+          temperature: settings.temperature,
+          timeoutMs: settings.requestTimeoutMs,
+          stream: options?.stream ?? settings.stream,
+          onDelta: options?.onDelta
+            ? (text: string) => {
+              options.onDelta!({ kind: 'content', text });
+            }
+            : undefined,
+          debugLog: debugEnabled
+            ? (line: string) => {
+              output.debug(`[AI] ${line}`);
+            }
+            : undefined,
+          debugMaxChars: settings.debugMaxChars,
+        },
+        messages
+      );
+
+      return response;
+    } else if (this.activeProvider === 'copilotAgent') {
+      const prompt = `${prompts.system}\n\n${prompts.user}`.trim();
+      const response = await CopilotAgentProvider.request(prompt, {
+        stream: options?.stream ?? settings.stream,
+        onDelta: options?.onDelta,
+      });
+
+      return response;
+    }
+
+    throw new Error(`Unsupported provider: ${this.activeProvider}`);
   }
 
   private parseResponse(response: string, provider: string): AiFixResult {

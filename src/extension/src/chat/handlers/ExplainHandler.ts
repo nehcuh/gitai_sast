@@ -69,7 +69,6 @@ export class ExplainHandler {
       stream.progress('Analyzing vulnerability...');
 
       const explanation = await this.generateExplanation(finding, stream);
-      stream.markdown(explanation);
       stream.markdown('---\n');
     }
 
@@ -90,8 +89,39 @@ export class ExplainHandler {
     finding: Finding,
     stream: vscode.ChatResponseStream
   ): Promise<string> {
-    // TODO: 使用 AI 生成详细解释
-    // 暂时返回基本描述
-    return `### ${finding.title}\n\n**Rule ID:** \`${finding.rule_id}\`\n\n**Severity:** ${finding.severity}\n\n**Description:** ${finding.description}\n\n**Code Snippet:**\n\`\`\`${finding.code_snippet}\n\`\`\``;
+    try {
+      let explanation = '';
+
+      // Use AI to generate detailed explanation
+      const result = await this.aiFixProvider.generateExplanation(
+        finding,
+        finding.code_snippet || '',
+        undefined,
+        {
+          stream: true,
+          onDelta: (delta) => {
+            if (delta.kind === 'content') {
+              explanation += delta.text;
+              stream.markdown(delta.text);
+            }
+          },
+        }
+      );
+
+      // If no streaming happened, return the result directly
+      if (!explanation) {
+        explanation = result;
+        stream.markdown(result);
+      }
+
+      return explanation;
+    } catch (error) {
+      const errorMsg = `Failed to generate explanation: ${error}`;
+      stream.markdown(`❌ ${errorMsg}\n\n`);
+      // Fallback to basic description
+      const fallback = `### ${finding.title}\n\n**Rule ID:** \`${finding.rule_id}\`\n\n**Severity:** ${finding.severity}\n\n**Description:** ${finding.description}\n\n**Code Snippet:**\n\`\`\`\n${finding.code_snippet}\n\`\`\``;
+      stream.markdown(fallback);
+      return fallback;
+    }
   }
 }
