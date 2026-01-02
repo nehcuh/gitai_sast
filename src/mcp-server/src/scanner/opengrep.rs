@@ -8,6 +8,10 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use tracing::{info, error, debug};
 use uuid::Uuid;
+use tokio::sync::Semaphore;
+
+/// Global semaphore to limit concurrent Opengrep scans to prevent resource exhaustion
+static SCAN_SEMAPHORE: Semaphore = Semaphore::const_new(4);
 
 /// Opengrep 扫描器
 pub struct OpengrepScanner {
@@ -68,6 +72,12 @@ impl OpengrepScanner {
         let scan_future = async {
             // 构建忽略规则（使用 HashSet 优化）
             let ignore_set = self.build_ignore_set(&ignores);
+
+            // Acquire permit to limit concurrency
+            // This waits if there are too many concurrent scans
+            let _permit = SCAN_SEMAPHORE.acquire().await.map_err(|e| {
+                ScanError::Execution(format!("Failed to acquire scan permit: {}", e))
+            })?;
 
             // 执行 opengrep 扫描（带超时）
             let findings = tokio::time::timeout(
