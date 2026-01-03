@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as output from '../core/OutputLogger';
+import { ConfigManager } from '../config/ConfigManager';
 import { ScanResponse, Finding } from './types';
 import { McpClient } from './McpClient'; // Kept for interface compatibility but not used for scanning anymore
 
@@ -17,9 +18,9 @@ export class SastScanner {
    * Scan a single file using opengrep CLI
    */
   async scanFile(root: string, fileUri: string, fileContent: string): Promise<ScanResponse> {
-    const config = vscode.workspace.getConfiguration('gitai.sast');
-    const opengrepPath = config.get<string>('opengrepPath', '') || 'opengrep';
-    const opengrepRules = config.get<string>('opengrepRules', '') || 'auto';
+    // Use ConfigManager to get configuration
+    const opengrepPath = ConfigManager.get<string>('opengrepPath', 'opengrep');
+    const opengrepRules = ConfigManager.get<string>('opengrepRules', 'auto');
 
     // Write content to a temp file to ensure we scan the latest buffer content
     // (Opengrep usually scans from disk, so we need to mock the file if it's dirty, or save it)
@@ -59,9 +60,9 @@ export class SastScanner {
    */
   async scanWorkspace(root: string, files: Record<string, string>): Promise<ScanResponse> {
     // For workspace scan, we simply run on the root directory
-    const config = vscode.workspace.getConfiguration('gitai.sast');
-    const opengrepPath = config.get<string>('opengrepPath', '') || 'opengrep';
-    const opengrepRules = config.get<string>('opengrepRules', '') || 'auto';
+    // Use ConfigManager to get configuration
+    const opengrepPath = ConfigManager.get<string>('opengrepPath', 'opengrep');
+    const opengrepRules = ConfigManager.get<string>('opengrepRules', 'auto');
 
     try {
       const args = ['scan', '--json', '--config', opengrepRules, root];

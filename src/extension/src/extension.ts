@@ -234,32 +234,41 @@ function registerAutoScan(
     return;
   }
 
+  let timeout: NodeJS.Timeout | undefined;
+
   const disposable = vscode.workspace.onDidSaveTextDocument(async (document) => {
     // 只扫描支持的文件类型
     if (!isSupportedFile(document)) {
       return;
     }
 
-    console.log(`[GitAI SAST] Auto-scanning ${document.fileName}...`);
-
-    try {
-      const response = await sastScanner.scanFile(
-        vscode.workspace.rootPath || '',
-        document.uri.fsPath,
-        document.getText()
-      );
-
-      diagnosticManager.updateDiagnostics(document.uri, response.findings);
-
-      const findingCount = response.findings.length;
-      if (findingCount > 0) {
-        vscode.window.showInformationMessage(
-          `Scan completed: ${findingCount} issue(s) found`
-        );
-      }
-    } catch (error) {
-      console.error(`[GitAI SAST] Auto-scan failed for ${document.fileName}:`, error);
+    // Debounce: Clear existing timer
+    if (timeout) {
+      clearTimeout(timeout);
     }
+
+    // Set new timer (500ms)
+    timeout = setTimeout(async () => {
+      console.log(`[GitAI SAST] Auto-scanning ${document.fileName}...`);
+
+      try {
+        const response = await sastScanner.scanFile(
+          vscode.workspace.rootPath || '',
+          document.uri.fsPath,
+          document.getText()
+        );
+
+        diagnosticManager.updateDiagnostics(document.uri, response.findings);
+
+        const findingCount = response.findings.length;
+        if (findingCount > 0) {
+          // Optional: Only show status bar or subtle notification instead of modal
+          // vscode.window.setStatusBarMessage(`$(shield) SAST: ${findingCount} issues`, 3000);
+        }
+      } catch (error) {
+        console.error(`[GitAI SAST] Auto-scan failed for ${document.fileName}:`, error);
+      }
+    }, 500);
   });
 
   context.subscriptions.push(disposable);
