@@ -79,7 +79,7 @@ export class ExplainHandler {
    * 获取 Findings
    */
   private async getFindings(uri: vscode.Uri): Promise<Finding[]> {
-    return this.diagnostics.getFindings(uri);
+    return this.diagnostics.getFindingsFuzzy(uri);
   }
 
   /**

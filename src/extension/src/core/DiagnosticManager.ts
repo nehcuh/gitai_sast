@@ -47,6 +47,31 @@ export class DiagnosticManager {
   }
 
   /**
+   * 模糊查找 Findings (通过 fsPath)
+   * 解决手动构造 URI 可能导致的 toString() 不一致问题
+   */
+  getFindingsFuzzy(targetUri: vscode.Uri): Finding[] {
+    // 1. 尝试精确匹配
+    const exact = this.currentFindings.get(targetUri.toString());
+    if (exact) return exact;
+
+    // 2. 尝试 fsPath 匹配
+    // 注意：这将遍历所有缓存的文件，性能稍差但更健壮
+    for (const [key, findings] of this.currentFindings) {
+      try {
+        const cachedUri = vscode.Uri.parse(key);
+        if (cachedUri.fsPath === targetUri.fsPath) {
+          return findings;
+        }
+      } catch (e) {
+        // ignore invalid keys
+      }
+    }
+
+    return [];
+  }
+
+  /**
    * 获取所有 Findings
    */
   getAllFindings(): Finding[] {

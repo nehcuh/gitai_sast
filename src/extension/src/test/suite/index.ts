@@ -213,6 +213,8 @@ async function testChatParticipantExplainUsesDiagnosticsFindings(): Promise<void
   const diagnostics = {
     getFindings: (uri: vscode.Uri) =>
       uri.toString() === document.uri.toString() ? [finding] : [],
+    getFindingsFuzzy: (uri: vscode.Uri) =>
+      uri.fsPath === document.uri.fsPath ? [finding] : [],
   } as any;
 
   const participant = new SastChatParticipant(
