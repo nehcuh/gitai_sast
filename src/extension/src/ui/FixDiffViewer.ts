@@ -299,24 +299,34 @@ export class FixDiffViewer {
     const startLineText = document.lineAt(range.start.line).text;
     const targetIndentMatch = startLineText.match(/^\s*/);
     const targetIndent = targetIndentMatch ? targetIndentMatch[0] : '';
+    const indentLen = targetIndent.length;
 
     // 3. 重新应用缩进
-    // 如果是单行替换，直接返回（假设 AI 已经处理好或者不需要缩进）
-    // 但通常 AI 返回的是多行或者整块代码
-    if (dedentedLines.length === 1 && !dedentedLines[0].includes('\n')) {
-      return dedentedLines[0]; // 单行暂不处理，依赖 formatSelection 可能更好，或者直接用
-    }
 
-    // 多行：第一行通常保持原样（如果是行内替换），后续行加缩进？
-    // 策略：如果 range.start.character > 0 (行内起始)，则第一行不加缩进，后续行加 targetIndent
-    // 如果 range.start.character == 0 (整行起始)，则所有行加 targetIndent
+    // check if range visually starts at the beginning of the line (ignoring whitespace)
     const isLineStart = range.start.character === 0 || startLineText.substring(0, range.start.character).trim() === '';
 
+    // check if the existing indentation is preserved (i.e., range starts AFTER indentation)
+    const indentationIsPreserved = range.start.character >= indentLen;
+
     return dedentedLines.map((line, index) => {
+      // Empty lines might need to be preserved empty or indented? Usually empty is fine.
       if (line.length === 0) return '';
-      if (index === 0 && !isLineStart) {
-        return line;
+
+      // For the first line:
+      if (index === 0) {
+        // If inline (mid-text), don't add indent
+        if (!isLineStart) return line;
+
+        // If line start:
+        // If indentation is already there (outside range), don't add it (avoid double indent)
+        if (indentationIsPreserved) return line;
+
+        // If indentation is overwritten (inside range), restore it.
+        return targetIndent + line;
       }
+
+      // For subsequent lines, always add targetIndent to the dedented content
       return targetIndent + line;
     }).join('\n');
   }
