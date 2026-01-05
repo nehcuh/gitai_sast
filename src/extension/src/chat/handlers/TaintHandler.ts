@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as fs from 'fs';
 import { McpClient } from '../../core/McpClient';
 import { Finding } from '../../core/types';
 import { DiagnosticManager } from '../../core/DiagnosticManager';
@@ -10,7 +11,7 @@ export class TaintHandler {
   constructor(
     private mcpClient: McpClient,
     private diagnostics: DiagnosticManager
-  ) {}
+  ) { }
 
   /**
    * 处理 Taint 命令
@@ -54,8 +55,29 @@ export class TaintHandler {
         const steps = taintPath.steps || [];
         for (let i = 0; i < steps.length; i++) {
           const step = steps[i];
+
+          let codeSnippet = step.code;
+          if (!codeSnippet && step.file) {
+            try {
+              const fileUri = vscode.Uri.file(step.file);
+              if (fs.existsSync(fileUri.fsPath)) {
+                const doc = await vscode.workspace.openTextDocument(fileUri);
+                const line = Math.max(0, step.line - 1);
+                const range = new vscode.Range(
+                  Math.max(0, line - 2), 0,
+                  Math.min(doc.lineCount - 1, line + 3), 0
+                );
+                codeSnippet = doc.getText(range).trim();
+              } else {
+                codeSnippet = `// File not found: ${step.file}`;
+              }
+            } catch (e: any) {
+              codeSnippet = `// Code not available: ${e.message}`;
+            }
+          }
+
           stream.markdown(`**Step ${i + 1}:** ${step.file}:${step.line}\n`);
-          stream.markdown(`\`\`\`\n${step.code}\n\`\`\`\n`);
+          stream.markdown(`\`\`\`\n${codeSnippet}\n\`\`\`\n`);
 
           if (step.annotation) {
             stream.markdown(`> ${step.annotation}\n\n`);

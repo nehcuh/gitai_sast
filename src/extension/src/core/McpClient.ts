@@ -1,6 +1,7 @@
 import { ChildProcessWithoutNullStreams, spawn } from 'child_process';
 import * as output from './OutputLogger';
 import { McpRequest, McpResponse } from './types';
+import { StringDecoder } from 'string_decoder';
 
 /**
  * MCP 客户端 - 通过 stdio 与 MCP Server 通信
@@ -10,8 +11,10 @@ export class McpClient {
   private process: ChildProcessWithoutNullStreams | null = null;
   private connecting: Promise<void> | null = null;
   private pendingRequests = new Map<string, { resolve: (value: any) => void; reject: (error: any) => void }>();
+  private buffer: string = '';
+  private decoder = new StringDecoder('utf8');
 
-  constructor(private serverPath: string) {}
+  constructor(private serverPath: string) { }
 
   /**
    * 更新 MCP Server 路径（会断开已有连接）
@@ -56,15 +59,24 @@ export class McpClient {
 
     this.process = child;
 
-    // 监听 stdout (响应)
+    // 监听 stdout (响应) - 使用 buffering 处理分块数据
     child.stdout?.on('data', (data: Buffer) => {
-      const lines = data.toString().split('\n').filter(l => l.trim());
-      for (const line of lines) {
+      this.buffer += this.decoder.write(data);
+
+      let newlineIndex;
+      while ((newlineIndex = this.buffer.indexOf('\n')) !== -1) {
+        const line = this.buffer.slice(0, newlineIndex).trim();
+        this.buffer = this.buffer.slice(newlineIndex + 1);
+
+        if (!line) continue;
+
         try {
           const response: McpResponse = JSON.parse(line);
           this.handleResponse(response);
         } catch (error) {
-          output.warn(`[MCP] Failed to parse response: ${line}`);
+          // 如果是一行完整的但解析失败，可能是混入了非 JSON 日志或其他输出
+          // 但这里的逻辑是假定只要有换行符就是一条完整的消息
+          output.warn(`[MCP] Failed to parse response line: ${line.substring(0, 200)}...`);
         }
       }
     });

@@ -15,16 +15,71 @@ export class SastScanner {
   constructor(private mcpClient: McpClient) { }
 
   /**
-   * Scan a single file using opengrep CLI
+   * Scan a single file using configured mode (local, remote, or both)
    */
   async scanFile(root: string, fileUri: string, fileContent: string): Promise<ScanResponse> {
-    // Use ConfigManager to get configuration
+    const provider = ConfigManager.get<string>('scannerProvider', 'local');
+    output.info(`[SastScanner] scanFile provider=${provider} file=${fileUri}`);
+
+    if (provider === 'remote') {
+      return this.scanFileRemote(root, fileUri, fileContent);
+    } else if (provider === 'both') {
+      const [local, remote] = await Promise.all([
+        this.scanFileLocal(root, fileUri, fileContent),
+        this.scanFileRemote(root, fileUri, fileContent)
+      ]);
+      return this.mergeResponses(local, remote);
+    } else {
+      return this.scanFileLocal(root, fileUri, fileContent);
+    }
+  }
+
+  /**
+   * Scan workspace using configured mode
+   */
+  async scanWorkspace(root: string, files: Record<string, string>): Promise<ScanResponse> {
+    const provider = ConfigManager.get<string>('scannerProvider', 'local');
+    output.info(`[SastScanner] scanWorkspace provider=${provider} root=${root}`);
+
+    if (provider === 'remote') {
+      return this.scanWorkspaceRemote(root, files);
+    } else if (provider === 'both') {
+      const [local, remote] = await Promise.all([
+        this.scanWorkspaceLocal(root),
+        this.scanWorkspaceRemote(root, files)
+      ]);
+      return this.mergeResponses(local, remote);
+    } else {
+      return this.scanWorkspaceLocal(root);
+    }
+  }
+
+  // --- Internal Implementation ---
+
+  private async scanFileRemote(root: string, fileUri: string, fileContent: string): Promise<ScanResponse> {
+    try {
+      const relativePath = fileUri.startsWith(root) ? path.relative(root, fileUri) : path.basename(fileUri);
+      const files = { [relativePath]: fileContent };
+
+      const scanResult = await this.mcpClient.callTool('scan', {
+        version: 1,
+        root,
+        files,
+        ignores: [],
+        config: this.getRemoteScanConfig()
+      });
+
+      return scanResult as ScanResponse;
+    } catch (e: any) {
+      output.error(`[SastScanner] Remote scan file failed: ${e.message}`);
+      return this.createEmptyResponse();
+    }
+  }
+
+  private async scanFileLocal(root: string, fileUri: string, fileContent: string): Promise<ScanResponse> {
     const opengrepPath = ConfigManager.get<string>('opengrepPath', 'opengrep');
     const opengrepRules = ConfigManager.get<string>('opengrepRules', 'auto');
 
-    // Write content to a temp file to ensure we scan the latest buffer content
-    // (Opengrep usually scans from disk, so we need to mock the file if it's dirty, or save it)
-    // For simplicity/safety with current architecture, let's dump to a temp file with same extension
     const ext = path.extname(fileUri);
     const tempFile = path.join(os.tmpdir(), `gitai_scan_${Date.now()}${ext}`);
 
@@ -32,21 +87,20 @@ export class SastScanner {
       fs.writeFileSync(tempFile, fileContent);
 
       const args = ['scan', '--json', '--config', opengrepRules, tempFile];
-      output.info(`[SastScanner] Running: ${opengrepPath} ${args.join(' ')}`);
+      output.info(`[SastScanner] Running Local: ${opengrepPath} ${args.join(' ')}`);
 
       const { stdout, stderr } = await this.execPromise(opengrepPath, args, { cwd: root });
 
       if (stderr && stderr.length > 0) {
-        output.info(`[SastScanner] stderr: ${stderr}`);
+        output.info(`[SastScanner] local stderr: ${stderr}`);
       }
 
       const runResult = JSON.parse(stdout);
       return this.parseOpengrepOutput(runResult, fileUri);
 
     } catch (e: any) {
-      output.error(`[SastScanner] Scan failed: ${e.message}`);
-      if (e.stdout) output.info(`[SastScanner] stdout: ${e.stdout}`);
-      // Return empty response on failure to avoid crashing UI
+      output.error(`[SastScanner] Local scan failed: ${e.message}`);
+      // return empty response to be safe
       return this.createEmptyResponse();
     } finally {
       if (fs.existsSync(tempFile)) {
@@ -55,28 +109,69 @@ export class SastScanner {
     }
   }
 
-  /**
-   * Scan workspace
-   */
-  async scanWorkspace(root: string, files: Record<string, string>): Promise<ScanResponse> {
-    // For workspace scan, we simply run on the root directory
-    // Use ConfigManager to get configuration
+  private async scanWorkspaceRemote(root: string, files: Record<string, string>): Promise<ScanResponse> {
+    try {
+      const scanResult = await this.mcpClient.callTool('scan', {
+        version: 1,
+        root,
+        files,
+        ignores: [],
+        config: this.getRemoteScanConfig()
+      });
+
+      return scanResult as ScanResponse;
+    } catch (e: any) {
+      output.error(`[SastScanner] Remote workspace scan failed: ${e.message}`);
+      return this.createEmptyResponse();
+    }
+  }
+
+  private async scanWorkspaceLocal(root: string): Promise<ScanResponse> {
     const opengrepPath = ConfigManager.get<string>('opengrepPath', 'opengrep');
     const opengrepRules = ConfigManager.get<string>('opengrepRules', 'auto');
 
     try {
       const args = ['scan', '--json', '--config', opengrepRules, root];
-      output.info(`[SastScanner] Workspace Scan: ${opengrepPath} ${args.join(' ')}`);
+      output.info(`[SastScanner] Running Local Workspace: ${opengrepPath} ${args.join(' ')}`);
 
       const { stdout } = await this.execPromise(opengrepPath, args, { cwd: root });
       const runResult = JSON.parse(stdout);
 
-      // Note: passing fileUri as empty or root acts as context
       return this.parseOpengrepOutput(runResult, '');
     } catch (e: any) {
-      output.error(`[SastScanner] Workspace scan failed: ${e.message}`);
+      output.error(`[SastScanner] Local workspace scan failed: ${e.message}`);
       return this.createEmptyResponse();
     }
+  }
+
+  private getRemoteScanConfig() {
+    return {
+      severity_threshold: ConfigManager.get<string>('severityThreshold', 'medium'),
+      enable_opengrep: false, // We are explicitly doing remote scan here
+      include_snippets: true,
+      max_concurrent_scans: 1,
+      timeout_seconds: 600, // Default 10 minutes
+      enable_remote_scan: true,
+      remote_url: ConfigManager.get<string>('remoteUrl', ''),
+      remote_user_id: ConfigManager.get<string>('remoteUserId', ''),
+      remote_allow_invalid_certs: ConfigManager.get<boolean>('remoteAllowInsecureTls', false),
+      remote_ca_cert_path: ConfigManager.get<string>('remoteCaCertPath', ''),
+    };
+  }
+
+  private mergeResponses(r1: ScanResponse, r2: ScanResponse): ScanResponse {
+    return {
+      version: r1.version,
+      status: 'success', // if either succeeded, we call it success for now
+      scan_envelope: {
+        scan_id: r1.scan_envelope.scan_id,
+        timestamp: new Date().toISOString(),
+        files_scanned: Math.max(r1.scan_envelope.files_scanned, r2.scan_envelope.files_scanned),
+        total_lines: Math.max(r1.scan_envelope.total_lines, r2.scan_envelope.total_lines),
+        duration_ms: Math.max(r1.scan_envelope.duration_ms, r2.scan_envelope.duration_ms)
+      },
+      findings: [...r1.findings, ...r2.findings]
+    };
   }
 
   private parseOpengrepOutput(data: any, originalUri: string): ScanResponse {

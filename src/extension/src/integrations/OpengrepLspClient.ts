@@ -101,7 +101,8 @@ export class OpengrepLspClient implements vscode.Disposable {
             initializationOptions: {
                 // Pass initialization options. Opengrep/Semgrep requires 'scan' key.
                 scan: {
-                    config: opengrepRules || 'auto'
+                    config: opengrepRules || 'auto',
+                    mode: config.get<string>('scanMode', 'currentFile')
                 }
             }
         };
@@ -168,7 +169,8 @@ export class OpengrepLspClient implements vscode.Disposable {
     handleConfigChange(e: vscode.ConfigurationChangeEvent): void {
         if (
             e.affectsConfiguration('gitai.sast.opengrepPath') ||
-            e.affectsConfiguration('gitai.sast.opengrepRules')
+            e.affectsConfiguration('gitai.sast.opengrepRules') ||
+            e.affectsConfiguration('gitai.sast.scanMode')
         ) {
             output.info('[OpengrepLsp] Configuration changed, restarting LSP...');
             void this.restart();

@@ -112,10 +112,24 @@
           "default": true,
           "description": "Enable automatic scanning on file save"
         },
-        "gitai.sast.enableRemoteScan": {
-          "type": "boolean",
-          "default": false,
-          "description": "Enable remote SAST scan"
+        "gitai.sast.scannerProvider": {
+          "type": "string",
+          "enum": [
+            "local",
+            "remote",
+            "both"
+          ],
+          "default": "local",
+          "description": "Select scanner engine: 'local' (Opengrep binary), 'remote' (Enterprise SAST), or 'both'."
+        },
+        "gitai.sast.scanMode": {
+          "type": "string",
+          "enum": [
+            "workspace",
+            "currentFile"
+          ],
+          "default": "currentFile",
+          "description": "Scope of background scanning: 'currentFile' (scan only active file), 'workspace' (scan entire workspace)."
         },
         "gitai.sast.remoteUrl": {
           "type": "string",
