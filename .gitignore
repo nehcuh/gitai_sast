@@ -43,3 +43,6 @@ build/
 
 # Local certificates (do not commit)
 src/extension/*.pem
+
+# Cache directories
+.cache/
